@@ -1,0 +1,3 @@
+runs/
+*.pt
+.ipynb_checkpoints/
