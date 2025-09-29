@@ -12,7 +12,6 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
-from ultralytics import YOLO
 
 # --- Configuration ---
 load_dotenv()

@@ -13,14 +13,11 @@ class Event(Base):
 
 class Team(Base):
     __tablename__ = 'teams'
-    id = Column(Integer, primary_key=True, name="time_id")
-    name = Column(String, nullable=False, unique=True, name="nome")
-    score = Column(Integer, default=0, name="pontuacao")
+    name = Column(String, primary_key=True, name="nome")
+    event_id = Column(Integer, ForeignKey('events.id_evento'), primary_key=True, name="id_evento")
 
+    score = Column(Integer, default=0, name="pontuacao")
     ## Score provavelmente contará com outras colunas como: numPlasticos, numPapeis, numMetais, etc.
-    
-    coordinator_id = Column(Integer, ForeignKey('coordinators.id_coordenador'), name="coordenador_id")
-    event_id = Column(Integer, ForeignKey('events.id_evento'), name="id_evento")
 
     coordinator = relationship("Coordinator", back_populates="teams")
     event = relationship("Event", back_populates="teams")
