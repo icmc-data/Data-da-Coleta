@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # Redis: Message broker for Celery
   redis:
@@ -15,7 +13,7 @@ services:
       - POSTGRES_PASSWORD=DataICMC
       - POSTGRES_DB=DataDaColeta
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data/
 
@@ -32,9 +30,12 @@ services:
   # Backend API Service (FastAPI)
   backend:
     build: .
+    env_file:
+      - .env
     command: uvicorn src.backend.main:app --host 0.0.0.0 --port 8000 --reload
     volumes:
       - ./src:/app/src
+      - uploads_data:/app/uploads
     ports:
       - "8000:8000"
     depends_on:
@@ -44,20 +45,29 @@ services:
   # Computer Vision Worker (Celery)
   worker:
     build: .
-    command: celery -A src.worker.tasks worker --loglevel=info
+    env_file:
+      - .env
+    environment:
+      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
+      - CHAT_ID=${CHAT_ID}
+    command: celery -A src.worker.celery_app.celery_app worker --loglevel=info
     volumes:
       - ./src:/app/src
+      - uploads_data:/app/uploads
     depends_on:
       - redis
 
   # Telegram Bot
   bot:
     build: .
-    command: python src/bot/bot.py
+    env_file:
+      - .env
+    command: python src/bot/telegramBot.py
     volumes:
       - ./src:/app/src
     depends_on:
       - backend
 
 volumes:
-  postgres_data:  
+  postgres_data:
+  uploads_data:  
