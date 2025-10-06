@@ -186,7 +186,7 @@ async def show_join_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 keyboard = [[InlineKeyboardButton("⬅️ Voltar pro menu inicial", callback_data="main_menu")]]
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 await query.edit_message_caption(
-                    caption="Nenhum grupo foi criado ainda 😭😭 Porque não   criar o seu próprio?",
+                    caption="Nenhum grupo foi criado ainda 😭😭 Porque não criar o seu próprio?",
                     reply_markup=reply_markup
                 )
                 return

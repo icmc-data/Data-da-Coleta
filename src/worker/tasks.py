@@ -74,23 +74,23 @@ def process_submission(submission_id: int):
                         detected_classes.append(class_name)
 
         if not detected_classes:
-            litter_type = "none"
+            litter_details = {}
             points = 0
             caption = "Nenhum lixo detectado na imagem."
             print("No objects detected.")
         else:
             class_counts = Counter(detected_classes)
-            litter_type = class_counts.most_common(1)[0][0]
+            litter_details = dict(class_counts)
             points = len(detected_classes) * 10
             
             caption = f"Foram detectados {len(detected_classes)} objetos:\n"
             for class_name, count in class_counts.items():
                 caption += f"- {class_name}: {count}\n"
             caption += f"\nTotal de pontos: {points}"
-            print(f"Detected {len(detected_classes)} objects. Most common: '{litter_type}'. Awarded {points} points.")
+            print(f"Detected {len(detected_classes)} objects. Awarded {points} points.")
 
         # 4. Update the submission record
-        submission.litter_type = litter_type
+        submission.litter_details = litter_details
         submission.points_awarded = points
         submission.status = 'confirmed'
 

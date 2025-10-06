@@ -103,7 +103,7 @@ class SubmissionResponse(SubmissionBase):
     id: int
     participant_id: str
     team_id: int
-    litter_type: str | None = None
+    litter_details: dict | None = None
     points_awarded: int
     status: str
     photo_path: str

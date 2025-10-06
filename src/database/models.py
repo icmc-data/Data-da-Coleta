@@ -1,4 +1,5 @@
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, LargeBinary, ForeignKeyConstraint, UniqueConstraint
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship, declarative_base, backref
 import datetime
 
@@ -48,7 +49,7 @@ class Submission(Base):
     longitude = Column(String, name="longitude", nullable=True)
 
     # Result of image recognition (if any)
-    litter_type = Column(String, name="litter_type", nullable=True) # e.g., 'plastic_bottle'
+    litter_details = Column(JSONB, nullable=True) # e.g., {'plastic_bottle': 2, 'Can': 1}
     points_awarded = Column(Integer, name="points_awarded", default=0)
     status = Column(String, default='confirmed', name="status") # e.g., 'pending_confirmation', 'confirmed'
 
