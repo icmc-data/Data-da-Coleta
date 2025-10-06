@@ -10,6 +10,10 @@ import shutil
 from pathlib import Path
 from PIL import Image
 from PIL.ExifTags import TAGS, GPSTAGS
+import piexif
+from pillow_heif import register_heif_opener
+
+register_heif_opener()
 
 from ..database import models
 from ..worker.tasks import process_submission
@@ -30,17 +34,13 @@ models.Base.metadata.create_all(bind=engine)
 
 # --- GPS Extraction Helpers ---
 def get_gps_info(image):
-    exif_data = image._getexif()
-    if not exif_data:
-        return None
-
-    gps_info = {}
-    for key, val in exif_data.items():
-        tag = TAGS.get(key)
-        if tag == "GPSInfo":
-            for t in val:
-                sub_tag = GPSTAGS.get(t)
-                gps_info[sub_tag] = val[t]
+    if "exif" in image.info:
+        exif_dict = piexif.load(image.info["exif"])
+        if piexif.GPSIFD in exif_dict:
+            gps_info = {}
+            for tag, val in exif_dict[piexif.GPSIFD].items():
+                tag_name = GPSTAGS.get(tag, tag)
+                gps_info[tag_name] = val
             return gps_info
     return None
 

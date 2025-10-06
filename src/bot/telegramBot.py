@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
+    Defaults,
     Application,
     CommandHandler,
     CallbackQueryHandler,
@@ -285,6 +286,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return # Should not happen due to the filter, but as a safeguard
 
     photo_file = await message.photo[-1].get_file()
+
     participant_id = str(user.id)
 
     # Let the user know the photo is being processed
@@ -309,6 +311,46 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     except Exception as e:
         logger.error(f"Error handling photo submission for user {user.id} in topic {message.message_thread_id}: {e}")
         await message.reply_text("❌ Ocorreu um erro inesperado. Tente novamente mais tarde.")
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handles document submissions (JPEG images) from users within a group topic.
+    """
+    message = update.message
+    user = update.effective_user
+
+    if not message.is_topic_message or not message.message_thread_id:
+        return
+
+    document = message.document
+    if document.mime_type not in ['image/jpeg', 'image/heic']:
+        await message.reply_text("Please send JPEG images as files.")
+        return
+
+    doc_file = await context.bot.get_file(document.file_id)
+    participant_id = str(user.id)
+
+    await message.reply_text("Processing your image... ⏳")
+
+    try:
+        doc_bytes = await doc_file.download_as_bytearray()
+
+        files = {'photo': (document.file_name, bytes(doc_bytes))}
+        data = {'participant_id': participant_id}
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(f"{BACKEND_URL}/submissions/", files=files, data=data)
+
+        if response.status_code == 201:
+            await message.reply_text("✅ Image sent successfully! Awaiting analysis.")
+        elif response.status_code == 404 and "Participant" in response.text:
+            await message.reply_text("❌ You don't seem to be registered in this team. Please use the bot's private chat menu to register.")
+        else:
+            await message.reply_text(f"❌ Error sending the image: {response.text}")
+
+    except Exception as e:
+        logger.error(f"Error handling document submission for user {user.id} in topic {message.message_thread_id}: {e}")
+        await message.reply_text("❌ An unexpected error occurred. Please try again later.")
 
 async def create_event_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -388,6 +430,7 @@ def main() -> None:
 
     # Group handler for photo submissions in topics
     application.add_handler(MessageHandler(filters.PHOTO & group_topic_filter, handle_photo))
+    application.add_handler(MessageHandler(filters.Document.IMAGE & group_topic_filter, handle_document))
 
     # Command to create a new event
     application.add_handler(CommandHandler("create_event", create_event_command, filters=filters.ChatType.SUPERGROUP))
