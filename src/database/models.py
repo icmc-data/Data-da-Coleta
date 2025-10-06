@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, LargeBinary, ForeignKeyConstraint
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, LargeBinary, ForeignKeyConstraint, UniqueConstraint
 from sqlalchemy.orm import relationship, declarative_base, backref
 import datetime
 
@@ -6,52 +6,50 @@ Base = declarative_base()
 
 class Event(Base):
     __tablename__ = 'events'
-    id = Column(Integer, primary_key=True, name="id_evento")
-    date = Column(DateTime, nullable=False, name="data")
+    id = Column(Integer, primary_key=True, name="id")
+    date = Column(DateTime, nullable=False, name="date")
 
     teams = relationship("Team", back_populates="event")
 
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, UniqueConstraint, ForeignKeyConstraint
-
 class Team(Base):
     __tablename__ = 'teams'
-    id = Column(Integer, primary_key=True)
-    name = Column(String, nullable=False, name="nome")
-    event_id = Column(Integer, ForeignKey('events.id_evento'), nullable=False, name="id_evento")
-    score = Column(Integer, default=0, name="pontuacao")
-    thread_id = Column(String, nullable=True, name="thread_id")
-
-    __table_args__ = (UniqueConstraint('nome', 'id_evento', name='_team_name_event_uc'),)
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String, name="name")
+    event_id = Column(Integer, ForeignKey('events.id'), name="event_id")
+    score = Column(Integer, default=0, name="score")
+    thread_id = Column(Integer, nullable=True, name="thread_id")
 
     event = relationship("Event", back_populates="teams")
     participants = relationship("Participant", back_populates="team")
     submissions = relationship("Submission", back_populates="team")
 
+    __table_args__ = (UniqueConstraint('name', 'event_id', name='_team_event_uc'),)
+
 class Participant(Base):
     __tablename__ = 'participants'
-    id = Column(String, primary_key=True, name="id_participante")
-    name = Column(String, nullable=False, name="nome")
-    team_id = Column(Integer, ForeignKey('teams.id'), name="time_id")
+    id = Column(String, primary_key=True, name="id")
+    name = Column(String, nullable=False, name="name")
+    team_id = Column(Integer, ForeignKey('teams.id'), name="team_id")
     
     team = relationship("Team", back_populates="participants")
 
 class Submission(Base):
     __tablename__ = 'submissions'
-    id = Column(Integer, primary_key=True, name="id_lixo")
-    participant_id = Column(String, ForeignKey('participants.id_participante'), name="id_participante")
-    team_id = Column(Integer, ForeignKey('teams.id'), name="time_id")
+    id = Column(Integer, primary_key=True, name="id")
+    participant_id = Column(String, ForeignKey('participants.id'), name="participant_id")
+    team_id = Column(Integer, ForeignKey('teams.id'), name="team_id")
     
     # Photo path will contain the local folder path to the saved image
-    photo_path = Column(String, name="caminho_foto", nullable=False)
+    photo_path = Column(String, name="photo_path", nullable=False)
 
     # Metadata from the photo files
-    timestamp = Column(DateTime, default=datetime.datetime.utcnow, name="data_envio")
+    timestamp = Column(DateTime, default=datetime.datetime.utcnow, name="timestamp")
     latitude = Column(String, name="latitude", nullable=True)
     longitude = Column(String, name="longitude", nullable=True)
 
     # Result of image recognition (if any)
-    litter_type = Column(String, name="tipo_lixo", nullable=True) # e.g., 'plastic_bottle'
-    points_awarded = Column(Integer, name="pontos", default=0)
+    litter_type = Column(String, name="litter_type", nullable=True) # e.g., 'plastic_bottle'
+    points_awarded = Column(Integer, name="points_awarded", default=0)
     status = Column(String, default='confirmed', name="status") # e.g., 'pending_confirmation', 'confirmed'
 
     team = relationship("Team", back_populates="submissions")

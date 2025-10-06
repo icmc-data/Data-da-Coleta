@@ -63,7 +63,7 @@ def process_submission(submission_id: int):
             # Save the image with bounding boxes
             # The result object has a save() method. It saves the image in a `runs/detect/predict` folder.
             # To save to a specific location, we can use the filename argument.
-            processed_image_path = submission.photo_path.replace(".jpg", "_processed.jpg")
+            processed_image_path = str(Path(submission.photo_path).with_suffix('')) + "_processed.jpg"
             results[0].save(filename=processed_image_path)
 
             for result in results:
