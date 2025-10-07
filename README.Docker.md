@@ -1,22 +1,23 @@
-### Building and running your application
+# Docker and Deployment
+
+This file provides a more detailed explanation of the Docker setup and guidance for deploying the application.
+
+## Docker Compose Services
+
+The `docker-compose.yml` file defines the following services:
+
+* **`redis`**: A Redis instance that acts as the message broker for Celery.
+* **`db`**: A PostgreSQL database to store application data. The data is persisted in a Docker volume named `postgres_data`.
+* **`pgadmin`**: A pgAdmin service for managing the PostgreSQL database. It's accessible at `http://localhost:5050`.
+* **`backend`**: The FastAPI application that serves the API. It depends on the `db` and `redis` services.
+* **`worker`**: The Celery worker that processes image submissions. It depends on the `redis` service.
+* **`bot`**: The Telegram bot that interacts with users. It depends on the `backend` service.
+
+---
+
+### Building and Running the Application
 
 When you're ready, start your application by running:
-`docker compose up --build`.
 
-Your application will be available at http://localhost:8000.
-
-### Deploying your application to the cloud
-
-First, build your image, e.g.: `docker build -t myapp .`.
-If your cloud uses a different CPU architecture than your development
-machine (e.g., you are on a Mac M1 and your cloud provider is amd64),
-you'll want to build the image for that platform, e.g.:
-`docker build --platform=linux/amd64 -t myapp .`.
-
-Then, push it to your registry, e.g. `docker push myregistry.com/myapp`.
-
-Consult Docker's [getting started](https://docs.docker.com/go/get-started-sharing/)
-docs for more detail on building and pushing.
-
-### References
-* [Docker's Python guide](https://docs.docker.com/language/python/)
+```bash
+docker compose up --build
