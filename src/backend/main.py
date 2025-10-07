@@ -1,5 +1,8 @@
 from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form
+from fastapi.responses import StreamingResponse
 import logging
+import io
+import csv
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 from pydantic import BaseModel
@@ -34,23 +37,59 @@ models.Base.metadata.create_all(bind=engine)
 
 # --- GPS Extraction Helpers ---
 def get_gps_info(image):
-    if "exif" in image.info:
-        exif_dict = piexif.load(image.info["exif"])
-        if piexif.GPSIFD in exif_dict:
-            gps_info = {}
-            for tag, val in exif_dict[piexif.GPSIFD].items():
-                tag_name = GPSTAGS.get(tag, tag)
-                gps_info[tag_name] = val
-            return gps_info
-    return None
+    """
+    Try piexif first (works well with JPEG & pillow-heif), then fallback to Pillow Exif.
+    Returns a dict with keys 'GPSLatitude', 'GPSLatitudeRef', 'GPSLongitude', 'GPSLongitudeRef', etc.,
+    or None if not available.
+    """
+    # 1) piexif path
+    exif_bytes = image.info.get("exif")
+    if exif_bytes:
+        try:
+            exif_dict = piexif.load(exif_bytes)
+            gps = exif_dict.get("GPS") or {}
+            if gps:
+                gps_named = {}
+                for tag, val in gps.items():
+                    tag_name = GPSTAGS.get(tag, tag)
+                    gps_named[tag_name] = val
+                return gps_named or None
+        except Exception as e:
+            print(f"[GPS] piexif parse failed: {e}")
+
+    # 2) Pillow Exif fallback
+    try:
+        exif = image.getexif()
+        if not exif:
+            return None
+        gps_ifd_tag = 0x8825  # GPSInfo
+        gps_ifd = exif.get(gps_ifd_tag)
+        if not gps_ifd:
+            return None
+        gps_named = {}
+        for k, v in gps_ifd.items():
+            key_name = GPSTAGS.get(k, k)
+            gps_named[key_name] = v
+        return gps_named or None
+    except Exception as e:
+        print(f"[GPS] Pillow getexif fallback failed: {e}")
+        return None
+
+def _to_float(rat):
+    # rat can be a tuple (num, den) or a PIL IFDRational
+    try:
+        return float(rat[0]) / float(rat[1])
+    except Exception:
+        return float(rat)
 
 def dms_to_dd(dms, ref):
-    degrees = dms[0]
-    minutes = dms[1] / 60.0
-    seconds = dms[2] / 3600.0
-    dd = degrees + minutes + seconds
-    if ref in ['S', 'W']:
-        dd *= -1
+    deg = _to_float(dms[0])
+    minutes = _to_float(dms[1])
+    seconds = _to_float(dms[2])
+    dd = deg + minutes/60.0 + seconds/3600.0
+    ref = ref.decode() if isinstance(ref, (bytes, bytearray)) else ref
+    if ref in ('S', 'W'):
+        dd = -dd
     return dd
 
 # --- Pydantic Models ---
@@ -231,7 +270,7 @@ def create_submission(
     
     team_id = participant.team_id
 
-    latitude, longitude = None, None
+    latitude = longitude = None
     try:
         image = Image.open(photo.file)
         gps_info = get_gps_info(image)
@@ -243,10 +282,16 @@ def create_submission(
             if lat_dms and lat_ref and lon_dms and lon_ref:
                 latitude = dms_to_dd(lat_dms, lat_ref)
                 longitude = dms_to_dd(lon_dms, lon_ref)
+        else:
+            print("[GPS] No GPS IFD present.")
     except Exception as e:
-        print(f"Could not extract GPS info: {e}")
+        print(f"[GPS] Could not extract GPS info: {e}")
     finally:
         photo.file.seek(0)
+
+    if latitude is None or longitude is None:
+        print(f"[GPS] Missing coords for file '{photo.filename}'. "
+          f"Remind users to send as Document, not Photo.")
 
     file_extension = Path(photo.filename).suffix
     unique_filename = f"{uuid.uuid4().hex}{file_extension}"
@@ -277,6 +322,53 @@ def create_submission(
     process_submission.delay(new_submission.id)
 
     return new_submission
+
+@app.get("/export/{format}")
+def export_data(format: str, db: Session = Depends(get_db)):
+    """
+    Exports all submission data in the specified format (csv or json).
+    """
+    if format not in ["csv", "json"]:
+        raise HTTPException(status_code=400, detail="Invalid format. Please use 'csv' or 'json'.")
+
+    submissions = db.query(models.Submission).all()
+
+    if format == "csv":
+        output = io.StringIO()
+        writer = csv.writer(output)
+        
+        # Write header
+        writer.writerow([
+            "submission_id", "participant_id", "team_id", "team_name", "timestamp", 
+            "latitude", "longitude", "litter_details", "points_awarded", "status"
+        ])
+        
+        # Write data
+        for sub in submissions:
+            writer.writerow([
+                sub.id, sub.participant_id, sub.team_id, sub.team.name, sub.timestamp, 
+                sub.latitude, sub.longitude, sub.litter_details, sub.points_awarded, sub.status
+            ])
+        
+        output.seek(0)
+        return StreamingResponse(output, media_type="text/csv", headers={"Content-Disposition": "attachment; filename=submissions.csv"})
+
+    elif format == "json":
+        data = [
+            {
+                "submission_id": sub.id, 
+                "participant_id": sub.participant_id, 
+                "team_id": sub.team_id, 
+                "team_name": sub.team.name, 
+                "timestamp": sub.timestamp, 
+                "latitude": sub.latitude, 
+                "longitude": sub.longitude, 
+                "litter_details": sub.litter_details, 
+                "points_awarded": sub.points_awarded, 
+                "status": sub.status
+            } for sub in submissions
+        ]
+        return data
 
 @app.get("/")
 def read_root():

@@ -2,6 +2,7 @@ import os
 import logging
 import json
 import datetime
+import asyncio
 from dotenv import load_dotenv
 import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -15,6 +16,7 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # --- Configuration ---
 load_dotenv()
@@ -273,44 +275,14 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handles photo submissions from users within a group topic.
-    It assumes the user is already a registered participant of the team associated with the topic.
-    """
-    # The message is in a topic, so we can reply in the topic.
     message = update.message
-    user = update.effective_user
-    
-    # Check if the message is in a topic
     if not message.is_topic_message or not message.message_thread_id:
-        return # Should not happen due to the filter, but as a safeguard
-
-    photo_file = await message.photo[-1].get_file()
-
-    participant_id = str(user.id)
-
-    # Let the user know the photo is being processed
-    await message.reply_text("Processando sua foto... ⏳")
-
-    try:
-        photo_bytes = await photo_file.download_as_bytearray()
-
-        files = {'photo': (photo_file.file_path.split('/')[-1], bytes(photo_bytes))}
-        data = {'participant_id': participant_id}
-
-        async with httpx.AsyncClient() as client:
-            response = await client.post(f"{BACKEND_URL}/submissions/", files=files, data=data)
-
-        if response.status_code == 201:
-            await message.reply_text("✅ Foto enviada com sucesso! Aguardando análise.")
-        elif response.status_code == 404 and "Participant" in response.text:
-             await message.reply_text("❌ Você não parece estar registrado neste time. Por favor, use o menu do bot em uma conversa privada para se registrar.")
-        else:
-            await message.reply_text(f"❌ Erro ao enviar a foto: {response.text}")
-
-    except Exception as e:
-        logger.error(f"Error handling photo submission for user {user.id} in topic {message.message_thread_id}: {e}")
-        await message.reply_text("❌ Ocorreu um erro inesperado. Tente novamente mais tarde.")
+        return
+    await message.reply_text(
+        "❗ Para salvar localização, envie a imagem como **Arquivo/Documento** (não como foto). "
+        "Toque no clipe > Arquivo > selecione a imagem original. Depois reenvie aqui."
+    )
+    return
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -351,6 +323,73 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     except Exception as e:
         logger.error(f"Error handling document submission for user {user.id} in topic {message.message_thread_id}: {e}")
         await message.reply_text("❌ An unexpected error occurred. Please try again later.")
+
+async def export_data_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Asks the user for the export format.
+    """
+    user = update.effective_user
+    chat = update.effective_chat
+
+    if chat.type != 'supergroup':
+        await update.message.reply_text("Este comando só pode ser usado em um chat de grupo.")
+        return
+
+    try:
+        chat_admins = await context.bot.get_chat_administrators(chat.id)
+        admin_ids = {admin.user.id for admin in chat_admins}
+
+        if user.id not in admin_ids:
+            await update.message.reply_text("❌ Apenas administradores podem exportar os dados.")
+            return
+
+        keyboard = [
+            [InlineKeyboardButton("CSV", callback_data="export_csv")],
+            [InlineKeyboardButton("JSON", callback_data="export_json")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text("Selecione o formato para exportar os dados:", reply_markup=reply_markup)
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Um erro inesperado aconteceu: {e}")
+        logger.error(f"Failed to ask for export format: {e}")
+
+
+async def export_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Fetches the data from the backend and sends the file to the user.
+    """
+    query = update.callback_query
+    await query.answer()
+
+    format = query.data.split("_")[-1]
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{BACKEND_URL}/export/{format}")
+
+            if response.status_code == 200:
+                if format == "csv":
+                    file_content = response.content
+                    await context.bot.send_document(
+                        chat_id=query.message.chat_id,
+                        document=file_content,
+                        filename="submissions.csv"
+                    )
+                elif format == "json":
+                    file_content = response.content
+                    await context.bot.send_document(
+                        chat_id=query.message.chat_id,
+                        document=file_content,
+                        filename="submissions.json"
+                    )
+            else:
+                await query.edit_message_text(f"❌ Erro ao exportar os dados: {response.text}")
+
+    except Exception as e:
+        await query.edit_message_text(f"❌ Um erro inesperado aconteceu: {e}")
+        logger.error(f"Failed to export data: {e}")
+
 
 async def create_event_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -397,6 +436,88 @@ async def create_event_command(update: Update, context: ContextTypes.DEFAULT_TYP
         logger.error(f"Failed to create event: {e}")
 
 
+class RankingManager:
+    def __init__(self, application):
+        self.application = application
+        self.ranking_thread_id = None
+        self.last_ranking_message_id = None
+
+    async def setup(self):
+        await self.create_ranking_topic()
+        if self.ranking_thread_id:
+            self.application.add_handler(MessageHandler(
+                filters.ChatType.SUPERGROUP,
+                self.delete_user_message
+            ))
+            scheduler = AsyncIOScheduler()
+            scheduler.add_job(self.show_ranking, 'interval', minutes=1)
+            scheduler.start()
+
+    async def create_ranking_topic(self):
+        try:
+            new_topic = await self.application.bot.create_forum_topic(chat_id=CHAT_ID, name="Ranking")
+            self.ranking_thread_id = new_topic.message_thread_id
+            logger.info(f"Created 'Ranking' topic with thread_id {self.ranking_thread_id}")
+        except Exception as e:
+            if "topic with the same name already exists" in str(e):
+                logger.warning("'Ranking' topic already exists. The bot will not post rankings until it is restarted.")
+            else:
+                logger.error(f"Failed to create 'Ranking' topic: {e}")
+
+    async def delete_user_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if update.message.message_thread_id == self.ranking_thread_id:
+            # Check if the user is an admin
+            chat_admins = await self.application.bot.get_chat_administrators(CHAT_ID)
+            admin_ids = {admin.user.id for admin in chat_admins}
+            if update.message.from_user.id not in admin_ids:
+                await update.message.delete()
+
+    async def show_ranking(self):
+        if not self.ranking_thread_id:
+            logger.warning("Ranking thread_id not available. Skipping ranking update.")
+            return
+
+        try:
+            if self.last_ranking_message_id:
+                await self.application.bot.delete_message(chat_id=CHAT_ID, message_id=self.last_ranking_message_id)
+        except Exception as e:
+            logger.warning(f"Failed to delete last ranking message: {e}")
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{BACKEND_URL}/ranking/")
+
+                if response.status_code == 200:
+                    teams = response.json()
+                    if not teams:
+                        message = await self.application.bot.send_message(
+                            chat_id=CHAT_ID, 
+                            message_thread_id=self.ranking_thread_id, 
+                            text="Ainda não há pontuação no ranking."
+                        )
+                        self.last_ranking_message_id = message.message_id
+                        return
+
+                    ranking_message = "🏆 **Ranking da Competição** 🏆\n\n"
+                    for i, team in enumerate(teams):
+                        ranking_message += f"{i+1}º - {team['name']}: {team['score']} pontos\n"
+                    
+                    message = await self.application.bot.send_message(
+                        chat_id=CHAT_ID, 
+                        message_thread_id=self.ranking_thread_id, 
+                        text=ranking_message, 
+                        parse_mode="Markdown"
+                    )
+                    self.last_ranking_message_id = message.message_id
+                else:
+                    logger.error(f"Failed to fetch ranking. Backend response: {response.text}")
+
+        except httpx.RequestError as e:
+            logger.error(f"HTTP error while fetching ranking: {e}")
+        except Exception as e:
+            logger.error(f"Failed to show ranking: {e}")
+
+
 def main() -> None:
     """Starts the bot and sets up handlers."""
     if not TELEGRAM_TOKEN or CHAT_ID == 0:
@@ -434,6 +555,16 @@ def main() -> None:
 
     # Command to create a new event
     application.add_handler(CommandHandler("create_event", create_event_command, filters=filters.ChatType.SUPERGROUP))
+
+    # Command to export data
+    application.add_handler(CommandHandler("export", export_data_command, filters=filters.ChatType.SUPERGROUP))
+    application.add_handler(CallbackQueryHandler(export_data, pattern="^export_csv$"))
+    application.add_handler(CallbackQueryHandler(export_data, pattern="^export_json$"))
+
+    # --- Start background tasks ---
+    ranking_manager = RankingManager(application)
+    loop = asyncio.get_event_loop()
+    loop.create_task(ranking_manager.setup())
 
     logger.info("Bot is starting...")
     application.run_polling()
