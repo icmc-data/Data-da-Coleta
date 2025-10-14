@@ -231,7 +231,7 @@ async def join_team(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             # Fetch team details to get thread_id and name
             team_response = await client.get(f"{BACKEND_URL}/teams/{team_id}")
             if team_response.status_code != 200:
-                await query.edit_message_text("❌ Erro ao obter detalhes do time. A associação pode ter funcionado, mas não consigo te dar o link.")
+                await query.edit_message_caption("❌ Erro ao obter detalhes do time. A associação pode ter funcionado, mas não consigo te dar o link.")
                 return
 
             team_data = team_response.json()
@@ -239,7 +239,7 @@ async def join_team(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             thread_id = team_data.get("thread_id")
 
             if not thread_id:
-                await query.edit_message_text(f"✅ Você foi registrado no time '{team_name}', mas parece que não há um tópico associado a ele no Telegram.")
+                await query.edit_message_caption(f"✅ Você foi registrado no time '{team_name}', mas parece que não há um tópico associado a ele no Telegram.")
                 return
 
             link_chat_id = str(CHAT_ID).replace("-100", "")
@@ -249,25 +249,25 @@ async def join_team(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
             if reg_response.status_code == 201:
                 logger.info(f"User {user.username} successfully registered for team '{team_name}' (ID: {team_id}).")
-                await query.edit_message_text(
+                await query.edit_message_caption(
                     f"✅ Você foi registrado no time '{team_name}' com sucesso!",
                     reply_markup=reply_markup
                 )
             elif reg_response.status_code == 400 and "already exists" in reg_response.text:
                 logger.info(f"User {user.username} was already registered for a team.")
-                await query.edit_message_text(
+                await query.edit_message_caption(
                     f"Você já está em um time, mas aqui está o link para '{team_name}':",
                     reply_markup=reply_markup
                 )
             else:
-                await query.edit_message_text(f"❌ Erro ao registrar no time: {reg_response.text}")
+                await query.edit_message_caption(f"❌ Erro ao registrar no time: {reg_response.text}")
 
     except httpx.RequestError as e:
         logger.error(f"HTTP error while trying to register participant: {e}")
-        await query.edit_message_text("❌ Erro de comunicação com o servidor. Tente novamente mais tarde.")
+        await query.edit_message_caption("❌ Erro de comunicação com o servidor. Tente novamente mais tarde.")
     except Exception as e:
         logger.error(f"An unexpected error occurred in join_team: {e}")
-        await query.edit_message_text("❌ Um erro inesperado aconteceu.")
+        await query.edit_message_caption("❌ Um erro inesperado aconteceu.")
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:

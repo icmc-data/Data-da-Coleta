@@ -200,6 +200,13 @@ def update_team_thread_id(team_id: int, team_update: TeamUpdate, db: Session = D
     db.refresh(db_team)
     return db_team
 
+@app.get("/teams/{team_id}", response_model=TeamResponse)
+def get_team(team_id: int, db: Session = Depends(get_db)):
+    team = db.query(models.Team).filter(models.Team.id == team_id).first()
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+    return team
+
 # --- API Endpoints for Events ---
 @app.post("/events/", response_model=EventResponse, status_code=201)
 def create_event(event: EventCreate, db: Session = Depends(get_db)):
