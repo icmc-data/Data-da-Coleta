@@ -224,12 +224,30 @@ async def remove_points(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         thread_id = message.message_thread_id
 
         async with httpx.AsyncClient() as client:
-            response = await client.patch(f"{BACKEND_URL}/teams/by_thread_id/{thread_id}/remove_score", json={"score": points_to_remove})
+            try:
+                # First, get the team_id from the thread_id
+                get_team_response = await client.get(f"{BACKEND_URL}/teams/by_thread/{thread_id}")
+                
+                if get_team_response.status_code != 200:
+                    await update.message.reply_text(f"❌ Erro ao encontrar o time para este chat: {get_team_response.text}")
+                    return
 
-            if response.status_code == 200:
-                await update.message.reply_text(f"✅ {points_to_remove} pontos foram removidos do time.")
-            else:
-                await update.message.reply_text(f"❌ Erro ao remover os pontos: {response.text}")
+                team_id = get_team_response.json()["id"]
+
+                # Now, remove the points from the team
+                remove_score_response = await client.patch(
+                    f"{BACKEND_URL}/teams/{team_id}/score",
+                    json={"points": points_to_remove}
+                )
+
+                if remove_score_response.status_code == 200:
+                    await update.message.reply_text(f"✅ {points_to_remove} pontos foram removidos do time.")
+                else:
+                    await update.message.reply_text(f"❌ Erro ao remover os pontos: {remove_score_response.text}")
+            
+            except httpx.RequestError as e:
+                await update.message.reply_text(f"❌ Erro de comunicação com o servidor: {e}")
+                logger.error(f"Failed to remove points due to communication error: {e}")
 
     except (IndexError, ValueError):
         await update.message.reply_text("Comando inválido. Use /remove_points <pontos>.")

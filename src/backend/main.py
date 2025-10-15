@@ -110,6 +110,9 @@ class TeamResponse(TeamBase):
 class TeamUpdate(BaseModel):
     thread_id: int
 
+class ScoreUpdate(BaseModel):
+    points: int
+
 class EventBase(BaseModel):
     date: datetime
 
@@ -205,6 +208,27 @@ def get_team(team_id: int, db: Session = Depends(get_db)):
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
     return team
+
+
+@app.patch("/teams/{team_id}/score", response_model=TeamResponse)
+def update_team_score(team_id: int, score_update: "ScoreUpdate", db: Session = Depends(get_db)):
+    db_team = db.query(models.Team).filter(models.Team.id == team_id).first()
+    if not db_team:
+        raise HTTPException(status_code=404, detail="Team not found")
+
+    db_team.score -= score_update.points
+    db.commit()
+    db.refresh(db_team)
+    return db_team
+
+
+@app.get("/teams/by_thread/{thread_id}", response_model=TeamResponse)
+def get_team_by_thread_id(thread_id: int, db: Session = Depends(get_db)):
+    team = db.query(models.Team).filter(models.Team.thread_id == thread_id).first()
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found for this thread.")
+    return team
+
 
 # --- API Endpoints for Events ---
 @app.post("/events/", response_model=EventResponse, status_code=201)
