@@ -1,0 +1,17 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+psycopg2-binary
+python-dotenv
+python-telegram-bot
+httpx
+celery
+redis
+ultralytics
+torch
+torchvision
+python-multipart
+Pillow
+pillow-heif
+piexif
+apscheduler

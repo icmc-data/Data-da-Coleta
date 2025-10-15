@@ -6,7 +6,7 @@ import csv
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 from pydantic import BaseModel
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 import uuid
 import shutil
@@ -149,7 +149,6 @@ class SubmissionResponse(SubmissionBase):
     class Config:
         from_attributes = True
 
-# --- FastAPI Application ---
 app = FastAPI(
     title="Data da Coleta API",
     description="Backend service for the Data da Coleta competition.",
@@ -266,16 +265,27 @@ def get_participant(participant_id: str, db: Session = Depends(get_db)):
 def create_submission(
     db: Session = Depends(get_db),
     photo: UploadFile = File(...),
-    participant_id: str = Form(...)
+    participant_id: str = Form(...),
+    thread_id: int = Form(...)
 ):
     """
     Creates a new submission, extracting GPS data from the image EXIF.
     """
+    # Find participant
     participant = db.query(models.Participant).filter(models.Participant.id == participant_id).first()
     if not participant:
         raise HTTPException(status_code=404, detail=f"Participant with ID '{participant_id}' not found.")
-    
-    team_id = participant.team_id
+
+    # Find team associated with the Telegram thread
+    team = db.query(models.Team).filter(models.Team.thread_id == thread_id).first()
+    if not team:
+        raise HTTPException(status_code=404, detail=f"No team is associated with this chat thread.")
+
+    # Check if the participant is registered in the correct team for this thread
+    if participant.team_id != team.id:
+        raise HTTPException(status_code=403, detail="You are not registered in this team. Please submit to your own team's chat.")
+
+    team_id = team.id
 
     latitude = longitude = None
     try:
@@ -317,7 +327,7 @@ def create_submission(
         participant_id=participant_id,
         team_id=team_id,
         photo_path=str(file_path),
-        timestamp=datetime.utcnow(),
+        timestamp=datetime.now(timezone.utc),
         latitude=str(latitude) if latitude else None,
         longitude=str(longitude) if longitude else None,
         status='pending_processing'

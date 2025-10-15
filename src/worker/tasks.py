@@ -87,7 +87,9 @@ def process_submission(submission_id: int):
         
         if results:
             # Save the image with bounding boxes
+            print(f"Saving processed image to {processed_image_path}")
             results[0].save(filename=processed_image_path)
+            print(f"File {processed_image_path} exists: {Path(processed_image_path).exists()}")
 
             for result in results:
                 if result.boxes:
