@@ -13,6 +13,11 @@ import pillow_heif
 
 pillow_heif.register_heif_opener()
 
+# --- File Storage Configuration ---
+UPLOADS_DIR = Path(os.getenv("UPLOADS_DIR", "uploads"))
+PROCESSED_DIR = UPLOADS_DIR / "processed_images"
+PROCESSED_DIR.mkdir(exist_ok=True)
+
 # --- YOLO Model Configuration ---
 MODEL_PATH = Path(__file__).parent / "weights" / "best.pt"
 
@@ -61,29 +66,13 @@ def process_submission(submission_id: int):
         image_path = Path(submission.photo_path)
         inference_image_path = image_path
 
-        # Convert HEIC to JPEG if necessary
-        if image_path.suffix.lower() in ['.heic', '.heif']:
-            try:
-                image = Image.open(image_path)
-                jpeg_path = image_path.with_suffix('.jpg')
-                # Preserve EXIF data
-                exif = image.info.get("exif", b"")
-                image.save(jpeg_path, "JPEG", exif=exif)
-                inference_image_path = jpeg_path
-                print(f"Converted HEIC image to {jpeg_path}")
-            except Exception as e:
-                print(f"Failed to convert HEIC image: {e}")
-                # If conversion fails, we can't process the image
-                submission.status = 'failed'
-                db.commit()
-                return
-
         # 2. Perform AI model inference
         results = model(inference_image_path)
         
         # 3. Process the results
         detected_classes = []
-        processed_image_path = str(Path(submission.photo_path).with_suffix('')) + "_processed.jpg"
+        processed_image_filename = Path(submission.photo_path).stem + "_processed.jpg"
+        processed_image_path = PROCESSED_DIR / processed_image_filename
         
         if results:
             # Save the image with bounding boxes

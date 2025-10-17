@@ -30,6 +30,9 @@ if not DATABASE_URL:
 UPLOADS_DIR = Path(os.getenv("UPLOADS_DIR", "uploads"))
 UPLOADS_DIR.mkdir(exist_ok=True)
 
+PROCESSED_DIR = UPLOADS_DIR / "processed_images"
+PROCESSED_DIR.mkdir(exist_ok=True)
+
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
@@ -286,7 +289,7 @@ def get_participant(participant_id: str, db: Session = Depends(get_db)):
 
 # --- API Endpoints for Submissions ---
 @app.post("/submissions/", response_model=SubmissionResponse, status_code=201)
-def create_submission(
+async def create_submission(
     db: Session = Depends(get_db),
     photo: UploadFile = File(...),
     participant_id: str = Form(...),
@@ -311,41 +314,63 @@ def create_submission(
 
     team_id = team.id
 
-    latitude = longitude = None
-    try:
-        image = Image.open(photo.file)
-        gps_info = get_gps_info(image)
-        if gps_info:
-            lat_dms = gps_info.get("GPSLatitude")
-            lat_ref = gps_info.get("GPSLatitudeRef")
-            lon_dms = gps_info.get("GPSLongitude")
-            lon_ref = gps_info.get("GPSLongitudeRef")
-            if lat_dms and lat_ref and lon_dms and lon_ref:
-                latitude = dms_to_dd(lat_dms, lat_ref)
-                longitude = dms_to_dd(lon_dms, lon_ref)
-        else:
-            print("[GPS] No GPS IFD present.")
-    except Exception as e:
-        print(f"[GPS] Could not extract GPS info: {e}")
-    finally:
-        photo.file.seek(0)
+    file_extension = Path(photo.filename).suffix.lower()
+    unique_filename_base = uuid.uuid4().hex
+
+    # Read the image once for GPS extraction and potential conversion
+    image_stream = io.BytesIO(await photo.read())
+    image = Image.open(image_stream)
+    
+    # Extract GPS info before potential conversion
+    gps_info = get_gps_info(image)
+    if gps_info:
+        lat_dms = gps_info.get("GPSLatitude")
+        lat_ref = gps_info.get("GPSLatitudeRef")
+        lon_dms = gps_info.get("GPSLongitude")
+        lon_ref = gps_info.get("GPSLongitudeRef")
+        if lat_dms and lat_ref and lon_dms and lon_ref:
+            latitude = dms_to_dd(lat_dms, lat_ref)
+            longitude = dms_to_dd(lon_dms, lon_ref)
+    else:
+        print("[GPS] No GPS IFD present.")
 
     if latitude is None or longitude is None:
         print(f"[GPS] Missing coords for file '{photo.filename}'. "
-          f"Remind users to send as Document, not Photo.")
+              f"Remind users to send as Document, not Photo.")
 
-    file_extension = Path(photo.filename).suffix
-    unique_filename = f"{uuid.uuid4().hex}{file_extension}"
-    file_path = UPLOADS_DIR / unique_filename
+    # Convert HEIC to JPG if necessary
+    if file_extension == ".heic":
+        output_filename = f"{unique_filename_base}.jpg"
+        file_path = UPLOADS_DIR / output_filename
+        try:
+            # Preserve EXIF data during conversion
+            exif_bytes = image.info.get("exif")
+            if exif_bytes:
+                image.save(file_path, "JPEG", exif=exif_bytes)
+            else:
+                image.save(file_path, "JPEG")
+            print(f"Converted HEIC image to {file_path}")
+            file_extension = ".jpg" # Update extension for database record
+        except Exception as e:
+            logging.error(f"Failed to convert HEIC image to JPG: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail="Failed to convert HEIC image.")
+    else:
+        output_filename = f"{unique_filename_base}{file_extension}"
+        file_path = UPLOADS_DIR / output_filename
+        try:
+            # Save original JPG directly
+            image_stream.seek(0) # Reset stream position
+            with file_path.open("wb") as buffer:
+                shutil.copyfileobj(image_stream, buffer)
+        except IOError as e:
+            logging.error(f"IOError when saving file: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail="Failed to save the uploaded photo.")
+    
+    # The rest of the function remains the same, but photo.file.close() is no longer needed
+    # as we read into a BytesIO object and then close it implicitly when it goes out of scope.
+    # Also, the photo.file.seek(0) is handled by image_stream.seek(0) for JPGs.
+    # The original photo.file is not directly used for saving after this point.
 
-    try:
-        with file_path.open("wb") as buffer:
-            shutil.copyfileobj(photo.file, buffer)
-    except IOError as e:
-        logging.error(f"IOError when saving file: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to save the uploaded photo.")
-    finally:
-        photo.file.close()
 
     new_submission = models.Submission(
         participant_id=participant_id,

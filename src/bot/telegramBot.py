@@ -3,6 +3,7 @@ import logging
 import json
 import datetime
 import asyncio
+from urllib.parse import urljoin
 from dotenv import load_dotenv
 import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -23,7 +24,7 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = int(os.getenv("CHAT_ID", 0))
 BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8000")
-
+GROUP_LINK = os.getenv("GROUP_LINK")
 PATH_IMAGES = os.getenv("PATH_IMAGES", "./images")
 
 # --- Logging ---
@@ -107,8 +108,8 @@ async def join_team(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await query.edit_message_caption(f"✅ Você foi registrado no time '{team_name}', mas parece que não há um tópico associado a ele no Telegram.")
                 return
 
-            link_chat_id = str(CHAT_ID).replace("-100", "")
-            topic_link = f"https://t.me/c/{link_chat_id}/{thread_id}"
+            
+            topic_link = urljoin(f"{GROUP_LINK}/", str(thread_id))
             keyboard = [[InlineKeyboardButton("➡️ Ir para o grupo!", url=topic_link)]]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
