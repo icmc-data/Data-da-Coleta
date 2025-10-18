@@ -79,11 +79,16 @@ def get_gps_info(image):
         return None
 
 def _to_float(rat):
-    # rat can be a tuple (num, den) or a PIL IFDRational
-    try:
-        return float(rat[0]) / float(rat[1])
-    except Exception:
-        return float(rat)
+    """
+    Converts a rational number (tuple of numerator and denominator) or a direct number to a float.
+    Handles PIL IFDRational objects as well.
+    """
+    if isinstance(rat, tuple):
+        try:
+            return float(rat[0]) / float(rat[1])
+        except ZeroDivisionError:
+            return 0.0 # Handle division by zero for rational numbers
+    return float(rat)
 
 def dms_to_dd(dms, ref):
     deg = _to_float(dms[0])
@@ -320,6 +325,9 @@ async def create_submission(
     # Read the image once for GPS extraction and potential conversion
     image_stream = io.BytesIO(await photo.read())
     image = Image.open(image_stream)
+
+    latitude = None
+    longitude = None
     
     # Extract GPS info before potential conversion
     gps_info = get_gps_info(image)
