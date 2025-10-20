@@ -6,6 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 import os
 import httpx
+import json
 from .celery_app import celery_app
 from ultralytics import YOLO
 from PIL import Image
@@ -19,7 +20,7 @@ PROCESSED_DIR = UPLOADS_DIR / "processed_images"
 PROCESSED_DIR.mkdir(exist_ok=True)
 
 # --- YOLO Model Configuration ---
-MODEL_PATH = Path(__file__).parent / "weights" / "best.pt"
+MODEL_PATH = Path(__file__).parent / "weights" / "YOLOv8_s" / "best.pt"
 
 if not MODEL_PATH.exists():
     print(f"CRITICAL: YOLO model not found at {MODEL_PATH}")
@@ -39,6 +40,29 @@ CHAT_ID = os.getenv("CHAT_ID")
 
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+
+def send_telegram_photo(url, data, files):
+    while True:
+        try:
+            with httpx.Client() as client:
+                response = client.post(url, data=data, files=files)
+                if response.status_code == 200:
+                    return response
+                if response.status_code == 429:
+                    try:
+                        retry_after = response.json().get("parameters", {}).get("retry_after", 2)
+                    except json.JSONDecodeError:
+                        retry_after = 2  # default wait time
+                    print(f"Rate limit exceeded. Retrying in {retry_after} seconds.")
+                    time.sleep(retry_after)
+                else:
+                    print(f"Error sending photo to Telegram: {response.text}")
+                    return response
+        except httpx.RequestError as e:
+            print(f"An error occurred while sending the photo: {e}")
+            time.sleep(5)  # wait 5 seconds before retrying on network errors
+
 
 @celery_app.task
 def process_submission(submission_id: int):
@@ -95,7 +119,7 @@ def process_submission(submission_id: int):
         else:
             class_counts = Counter(detected_classes)
             litter_details = dict(class_counts)
-            points = len(detected_classes) * 10
+            points = len(detected_classes)
             
             caption = f"Foram detectados {len(detected_classes)} objetos:\n"
             for class_name, count in class_counts.items():
@@ -125,9 +149,9 @@ def process_submission(submission_id: int):
                     data = {"chat_id": CHAT_ID, "message_thread_id": team.thread_id, "caption": caption}
                     
                     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
-                    response = httpx.post(url, data=data, files=files)
-                    
-                    if response.status_code != 200:
+                    response = send_telegram_photo(url, data=data, files=files)
+
+                    if response and response.status_code != 200:
                         print(f"Error sending photo to Telegram: {response.text}")
             except Exception as e:
                 print(f"Failed to send photo to Telegram: {e}")

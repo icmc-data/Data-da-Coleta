@@ -2,6 +2,7 @@ import os
 import logging
 import json
 import datetime
+import time
 import asyncio
 from urllib.parse import urljoin
 from dotenv import load_dotenv
@@ -18,6 +19,7 @@ from telegram.ext import (
     ContextTypes,
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from decorators import rate_limit_handler
 
 # --- Configuration ---
 load_dotenv()
@@ -70,7 +72,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             reply_markup = InlineKeyboardMarkup(keyboard)
             await update.message.reply_photo(
                 photo=open(os.path.join(PATH_IMAGES, 'hamster.jpg'), 'rb'),
-                caption="Selecione um dos grupos abaixo para se registrar e participar ➡️", 
+                caption="DATA 🤝 SEMCOMP \n\nSelecione abaixo sua casa do overflow para se registrar e participar do Data Da Coleta", 
                 reply_markup=reply_markup
             )
     except Exception as e:
@@ -116,7 +118,7 @@ async def join_team(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if reg_response.status_code == 201:
                 logger.info(f"User {user.username} successfully registered for team '{team_name}' (ID: {team_id}).")
                 await query.edit_message_caption(
-                    f"✅ Você foi registrado no time '{team_name}' com sucesso!",
+                    f"✅ Você está pronto para representar sua casa {team_name}! Junte amigos e boa aventura!",
                     reply_markup=reply_markup
                 )
             elif reg_response.status_code == 400 and "already exists" in reg_response.text:
@@ -140,6 +142,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("Ação Cancelada. Use /start para ver o menu principal.")
     return ConversationHandler.END
 
+@rate_limit_handler
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message
     if not message.is_topic_message or not message.message_thread_id:
@@ -150,6 +153,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
     return
 
+@rate_limit_handler
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Handles document submissions (JPEG and HEIC images) from users within a group topic.
@@ -168,8 +172,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     doc_file = await context.bot.get_file(document.file_id)
     participant_id = str(user.id)
 
-    await message.reply_text("Processing your image... ⏳")
-
     try:
         doc_bytes = await doc_file.download_as_bytearray()
 
@@ -184,21 +186,21 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         if response.status_code == 201:
             logger.info(f"User {user.username} submitted an image in topic {message.message_thread_id}.")
-            await message.reply_text("✅ Image sent successfully! Awaiting analysis.")
+            await message.reply_text("✅ Imagem submetida com sucesso! Aguarde uns segundinhos até a imagem ser processada.")
         elif response.status_code == 403:
             logger.warning(f"User {user.username} tried to submit to a wrong team in topic {message.message_thread_id}.")
-            await message.reply_text("❌ You can only submit photos to the chat of the team you are registered in.")
+            await message.reply_text("❌ Ô zé, vc tá mandando a foto pra casa errada.")
         elif response.status_code == 404:
             if "Participant" in response.text:
-                await message.reply_text("❌ You don't seem to be registered yet. Please use the bot's private chat menu to register.")
+                await message.reply_text("❌ Vc parece não tá registrado ainda. Manda mensagem pro nosso mano @DataDaColeta_Bot pra se registrar.")
             else: # Team not found for the thread
-                await message.reply_text("❌ This chat is not associated with any team.")
+                await message.reply_text("❌ Esse canal não é pra mandar fotos 😭😭😭😭😭.")
         else:
-            await message.reply_text(f"❌ Error sending the image: {response.text}")
+            await message.reply_text(f"❌ Deu um erro aí. Perdoar 🙏🙏. Erro: {response.text}")
 
     except Exception as e:
         logger.error(f"Error handling document submission for user {user.id} in topic {message.message_thread_id}: {e}")
-        await message.reply_text("❌ An unexpected error occurred. Please try again later.")
+        await message.reply_text("❌ Algum trem quebrou aqui :( Tenta de novo mais tarde, pufavo.")
 
 async def remove_points(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Removes points from a team's score."""
@@ -214,11 +216,11 @@ async def remove_points(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         admin_ids = {admin.user.id for admin in chat_admins}
 
         if user.id not in admin_ids:
-            await update.message.reply_text("❌ Apenas administradores podem remover pontos.")
+            await update.message.reply_text("❌ Seu safadinho. Apenas administradores podem remover pontos 😤😤")
             return
 
         if not context.args:
-            await update.message.reply_text("Por favor, especifique a quantidade de pontos a ser removida. Ex: /remove_points 20")
+            await update.message.reply_text("Esqueceu, zé? Precisa botar a quantidade de pontos depois do comando Ex: /remove_points 20")
             return
 
         points_to_remove = int(context.args[0])
@@ -376,9 +378,13 @@ class RankingManager:
         self.ranking_thread_id = None
         self.last_ranking_message_id = None
         self.last_ranking_text = None
+        self.thread_id_file = "src/bot/ranking_thread_id.txt"
 
     async def setup(self):
-        await self.create_ranking_topic()
+        self.load_ranking_thread_id()
+        if not self.ranking_thread_id:
+            await self.create_ranking_topic()
+
         if self.ranking_thread_id:
             self.application.add_handler(MessageHandler(
                 filters.ChatType.SUPERGROUP,
@@ -388,14 +394,31 @@ class RankingManager:
             scheduler.add_job(self.show_ranking, 'interval', minutes=1)
             scheduler.start()
 
+    def load_ranking_thread_id(self):
+        try:
+            with open(self.thread_id_file, "r") as f:
+                self.ranking_thread_id = int(f.read().strip())
+                logger.info(f"Loaded 'Ranking' topic thread_id {self.ranking_thread_id} from file.")
+        except (FileNotFoundError, ValueError):
+            logger.info(f"'{self.thread_id_file}' not found or invalid. A new topic will be created.")
+            self.ranking_thread_id = None
+
+    def save_ranking_thread_id(self):
+        with open(self.thread_id_file, "w") as f:
+            f.write(str(self.ranking_thread_id))
+        logger.info(f"Saved 'Ranking' topic thread_id {self.ranking_thread_id} to file.")
+
     async def create_ranking_topic(self):
         try:
             new_topic = await self.application.bot.create_forum_topic(chat_id=CHAT_ID, name="Ranking")
             self.ranking_thread_id = new_topic.message_thread_id
+            self.save_ranking_thread_id()
             logger.info(f"Created 'Ranking' topic with thread_id {self.ranking_thread_id}")
         except Exception as e:
             if "topic with the same name already exists" in str(e):
-                logger.warning("'Ranking' topic already exists. The bot will not post rankings until it is restarted.")
+                logger.warning("'Ranking' topic already exists, but I could not get its thread_id. "
+                               f"Please find the thread_id of the 'Ranking' topic and save it to the '{self.thread_id_file}' file. "
+                               "The bot will not post rankings until this is done.")
             else:
                 logger.error(f"Failed to create 'Ranking' topic: {e}")
 
