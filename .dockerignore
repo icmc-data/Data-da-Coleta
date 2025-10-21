@@ -1,2 +1,22 @@
+.git
+.gitignore
+.dockerignore
+Dockerfile
+README.md
+README.Docker.md
+GEMINI.md
+Requisitos Data da Coleta (1).pdf
+yolo.job
 notebooks
 .env
+.pytest_cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.idea
+.vscode
+*.swp
+.DS_Store
+images
+uploads
