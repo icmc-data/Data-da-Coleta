@@ -475,6 +475,115 @@ class RankingManager:
         except Exception as e:
             logger.error(f"Failed to show ranking: {e}")
 
+async def create_topic_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    Starts the conversation to create a new topic.
+    This command can only be used in a private chat with the bot.
+    """
+    user = update.effective_user
+    try:
+        # Get chat administrators of the supergroup
+        chat_admins = await context.bot.get_chat_administrators(CHAT_ID)
+        admin_ids = {admin.user.id for admin in chat_admins}
+
+        # Check if the user is an administrator
+        if user.id not in admin_ids:
+            await update.message.reply_text("❌ Apenas administradores podem criar novos times.")
+            return ConversationHandler.END
+
+        await update.message.reply_text("Qual o nome do novo time que você quer criar?")
+        return ASK_TOPIC_NAME
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Um erro inesperado aconteceu: {e}")
+        logger.error(f"Failed to start create topic conversation: {e}")
+        return ConversationHandler.END
+
+async def create_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    Creates a new team in the backend, a new topic in Telegram,
+    and registers the creator as the first participant.
+    """
+    topic_name = update.message.text
+    user = update.effective_user
+    
+    try:
+        # Step 1: Get the latest event
+        async with httpx.AsyncClient() as client:
+            events_response = await client.get(f"{BACKEND_URL}/events/")
+            if events_response.status_code != 200 or not events_response.json():
+                await update.message.reply_text("❌ Não há eventos ativos para criar times. Peça para um admin criar um novo evento.")
+                return ConversationHandler.END
+
+            latest_event_id = events_response.json()[0]["id"]
+
+            # Step 2: Create the team in the backend
+            team_data = {"name": topic_name, "event_id": latest_event_id}
+            response = await client.post(f"{BACKEND_URL}/teams/", json=team_data)
+
+            if response.status_code == 201:
+                team_id = response.json()["id"]
+                logger.info(f"Team '{topic_name}' created in backend with ID {team_id}.")
+
+                # Step 3: Register the creator as a participant
+                participant_data = {
+                    "id": str(user.id),
+                    "name": user.full_name,
+                    "team_id": team_id
+                }
+                part_response = await client.post(f"{BACKEND_URL}/participants/", json=participant_data)
+                if part_response.status_code != 201:
+                    logger.error(f"Failed to register participant {user.username} for new team '{topic_name}'. Backend response: {part_response.text}")
+
+            elif response.status_code == 400 and "already exists" in response.text:
+                await update.message.reply_text(f"❌ O time '{topic_name}' já existe. Por favor, escolha outro nome.")
+                return ConversationHandler.END
+            else:
+                await update.message.reply_text(f"❌ Erro ao criar o time no servidor: {response.text}")
+                return ConversationHandler.END
+
+        # Step 4: Create the topic in Telegram
+        new_topic = await context.bot.create_forum_topic(chat_id=CHAT_ID, name=topic_name)
+        thread_id = new_topic.message_thread_id
+
+        # Step 5: Update the team in the backend with the thread_id
+        async with httpx.AsyncClient() as client:
+            update_data = {"thread_id": str(thread_id)}
+            update_response = await client.patch(f"{BACKEND_URL}/teams/{team_id}", json=update_data)
+            if update_response.status_code != 200:
+                logger.error(f"Failed to update team {team_id} with thread_id {thread_id}. Backend response: {update_response.text}")
+
+        welcome_message_text = (
+            f'👋 **Seja bem-vindo ao grupo "{topic_name}"!**\n\n'
+            f"O grupo foi criado e você foi registrado como o primeiro participante, {user.mention_markdown()}."
+        )
+        await context.bot.send_message(
+            chat_id=CHAT_ID,
+            message_thread_id=thread_id,
+            text=welcome_message_text,
+            parse_mode="Markdown"
+        )
+
+        # Step 6: Send confirmation to the user
+        link_chat_id = str(CHAT_ID).replace("-100", "")
+        topic_link = f"https://t.me/c/{link_chat_id}/{thread_id}"
+        
+        keyboard = [[InlineKeyboardButton("➡️ Ir para o grupo!", url=topic_link)]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            f"✅ Maravilha! O grupo \"{topic_name}\" foi criado e você foi registrado nele.", reply_markup=reply_markup
+        )
+        logger.info(f"User {user.username} created topic '{topic_name}' and was registered in chat {CHAT_ID}")
+
+    except httpx.RequestError as e:
+        logger.error(f"HTTP error while creating topic/participant: {e}")
+        await update.message.reply_text("❌ Erro de comunicação com o servidor. Tente novamente mais tarde.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Um erro inesperado aconteceu: {e}")
+        logger.error(f"Failed to create topic and register participant in chat {CHAT_ID}: {e}")
+        
+    return ConversationHandler.END
 
 def main() -> None:
     """Starts the bot and sets up handlers."""
@@ -508,6 +617,16 @@ def main() -> None:
     application.add_handler(CommandHandler("export", export_data_command, filters=filters.ChatType.SUPERGROUP))
     application.add_handler(CallbackQueryHandler(export_data, pattern="^export_csv$"))
     application.add_handler(CallbackQueryHandler(export_data, pattern="^export_json$"))
+
+    # Conversation handler for creating a new topic
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('create_topic', create_topic_command, filters=private_filter)],
+        states={
+            ASK_TOPIC_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_topic)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)],
+    )
+    application.add_handler(conv_handler)
 
     # --- Start background tasks ---
     ranking_manager = RankingManager(application)
