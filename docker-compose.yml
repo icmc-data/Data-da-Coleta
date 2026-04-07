@@ -30,12 +30,16 @@ services:
   # Backend API Service (FastAPI)
   backend:
     build: .
+    dns:
+      - 8.8.8.8
     env_file:
       - .env
     command: uvicorn src.backend.main:app --host 0.0.0.0 --port 8000 --reload
     volumes:
       - ./src:/app/src
       - ./uploads:/app/uploads
+      - ./alembic.ini:/app/alembic.ini
+      - ./migrations:/app/migrations
     ports:
       - "8000:8000"
     depends_on:
@@ -45,6 +49,8 @@ services:
   # Computer Vision Worker (Celery)
   worker:
     build: .
+    dns:
+      - 8.8.8.8
     env_file:
       - .env
     environment:
@@ -60,11 +66,14 @@ services:
   # Telegram Bot
   bot:
     build: .
+    dns:
+      - 8.8.8.8
     env_file:
       - .env
     command: python src/bot/telegramBot.py
     volumes:
       - ./src:/app/src
+      - ./images:/app/images
     depends_on:
       - backend
 

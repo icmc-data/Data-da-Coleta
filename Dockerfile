@@ -30,7 +30,11 @@ COPY requirements.txt .
 RUN python -m pip install -r requirements.txt
 
 # Copy the source code into the container.
-COPY . .
+COPY ./src ./src
+
+# Copy Alembic config and migrations
+COPY alembic.ini .
+COPY ./migrations ./migrations
 
 # Switch to the non-privileged user to run the application.
 USER appuser

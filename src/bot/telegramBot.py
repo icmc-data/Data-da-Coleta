@@ -1,146 +1,145 @@
-import os
-import logging
-import json
-import datetime
-import time
 import asyncio
+import logging
+import os
+import time
+import datetime
 from urllib.parse import urljoin
-from dotenv import load_dotenv
+
 import httpx
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from dotenv import load_dotenv
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
-    Defaults,
     Application,
-    CommandHandler,
     CallbackQueryHandler,
+    CommandHandler,
     ConversationHandler,
+    ContextTypes,
     MessageHandler,
     filters,
-    ContextTypes,
 )
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
 from decorators import rate_limit_handler
 
-# --- Configuration ---
 load_dotenv()
+
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = int(os.getenv("CHAT_ID", 0))
 BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8000")
 GROUP_LINK = os.getenv("GROUP_LINK")
 PATH_IMAGES = os.getenv("PATH_IMAGES", "./images")
 
-# --- Logging ---
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Conversation States ---
+# Conversation state
 ASK_TOPIC_NAME = range(1)
 
-# --- Bot Handlers ---
+# --- Admin cache ---
+# Avoids a Telegram API call on every message in the ranking topic.
+_admin_cache: dict[int, tuple[set[int], float]] = {}
+ADMIN_CACHE_TTL = 300.0  # seconds
+
+
+async def _get_admin_ids(bot, chat_id: int) -> set[int]:
+    now = time.monotonic()
+    cached = _admin_cache.get(chat_id)
+    if cached and (now - cached[1]) < ADMIN_CACHE_TTL:
+        return cached[0]
+    admins = await bot.get_chat_administrators(chat_id)
+    admin_ids = {a.user.id for a in admins}
+    _admin_cache[chat_id] = (admin_ids, now)
+    return admin_ids
+
+
+# --- Handlers ---
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Displays the main menu.
-    - Sends a new photo message if triggered by /start.
-    - Edits the existing message if triggered by a 'Back' button.
-    """
+    """Displays the main menu with joinable teams."""
+    http: httpx.AsyncClient = context.bot_data['http']
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(f"{BACKEND_URL}/teams/")
-            if response.status_code != 200:
-                await update.message.reply_text(text="❌ Erro ao carregar os times do servidor.")
-                return
-            
-            teams = response.json()
-            
-            # Filter for teams that have a thread_id, meaning they are associated with a Telegram topic
-            joinable_teams = [team for team in teams if team.get("thread_id")]
+        response = await http.get("/teams/")
+        if response.status_code != 200:
+            await update.message.reply_text("❌ Erro ao carregar os times do servidor.")
+            return
 
-            if not joinable_teams:
-                await update.message.reply_text(
-                    text="Nenhum grupo foi criado ainda 😭😭 Porque não criar o seu próprio?"
-                )
-                return
+        teams = response.json()
+        joinable_teams = [t for t in teams if t.get("thread_id")]
 
-            emojis = ["🔥", "🗻", "🪓", "🌎"]
+        if not joinable_teams:
+            await update.message.reply_text("Nenhum grupo foi criado ainda 😭😭 Porque não criar o seu próprio?")
+            return
 
-            keyboard = []
-            for i, team in enumerate(sorted(joinable_teams, key=lambda t: t['name'])):
-                emoji = emojis[i]
-                button = InlineKeyboardButton(f"{emoji} {team['name']}", callback_data=f"join_team_{team['id']}")
-                keyboard.append([button])
-            
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await update.message.reply_photo(
-                photo=open(os.path.join(PATH_IMAGES, 'hamster.jpg'), 'rb'),
-                caption="DATA 🤝 SEMCOMP \n\nSelecione abaixo sua casa do overflow para se registrar e participar do Data Da Coleta", 
-                reply_markup=reply_markup
-            )
+        emojis = ["🔥", "🗻", "🪓", "🌎"]
+        keyboard = [
+            [InlineKeyboardButton(f"{emojis[i]} {team['name']}", callback_data=f"join_team_{team['id']}")]
+            for i, team in enumerate(sorted(joinable_teams, key=lambda t: t['name']))
+        ]
+        await update.message.reply_photo(
+            photo=open(os.path.join(PATH_IMAGES, 'hamster.jpg'), 'rb'),
+            caption="DATA 🤝 SEMCOMP \n\nSelecione abaixo sua casa do overflow para se registrar e participar do Data Da Coleta",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
     except Exception as e:
-        logger.error(f"An error occurred in show_join_menu: {e}")
+        logger.error(f"Error in start handler: {e}")
+
 
 async def join_team(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles a user's request to join a team and registers them as a participant."""
+    """Registers a user as a participant in the chosen team."""
     query = update.callback_query
     await query.answer()
 
     user = update.effective_user
     team_id = int(query.data.split("_")[-1])
+    http: httpx.AsyncClient = context.bot_data['http']
 
     try:
-        async with httpx.AsyncClient() as client:
-            # Register the participant
-            participant_data = {
-                "id": str(user.id),
-                "name": user.full_name,
-                "team_id": team_id
-            }
-            reg_response = await client.post(f"{BACKEND_URL}/participants/", json=participant_data)
+        reg_response = await http.post("/participants/", json={
+            "id": str(user.id),
+            "name": user.full_name,
+            "team_id": team_id,
+        })
 
-            # Fetch team details to get thread_id and name
-            team_response = await client.get(f"{BACKEND_URL}/teams/{team_id}")
-            if team_response.status_code != 200:
-                await query.edit_message_caption("❌ Erro ao obter detalhes do time. A associação pode ter funcionado, mas não consigo te dar o link.")
-                return
+        team_response = await http.get(f"/teams/{team_id}")
+        if team_response.status_code != 200:
+            await query.edit_message_caption("❌ Erro ao obter detalhes do time.")
+            return
 
-            team_data = team_response.json()
-            team_name = team_data.get("name")
-            thread_id = team_data.get("thread_id")
+        team_data = team_response.json()
+        team_name = team_data.get("name")
+        thread_id = team_data.get("thread_id")
 
-            if not thread_id:
-                await query.edit_message_caption(f"✅ Você foi registrado no time '{team_name}', mas parece que não há um tópico associado a ele no Telegram.")
-                return
+        if not thread_id:
+            await query.edit_message_caption(f"✅ Você foi registrado no time '{team_name}', mas não há tópico associado.")
+            return
 
-            
-            topic_link = urljoin(f"{GROUP_LINK}/", str(thread_id))
-            keyboard = [[InlineKeyboardButton("➡️ Ir para o grupo!", url=topic_link)]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
+        topic_link = urljoin(f"{GROUP_LINK}/", str(thread_id))
+        reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Ir para o grupo!", url=topic_link)]])
 
-            if reg_response.status_code == 201:
-                logger.info(f"User {user.username} successfully registered for team '{team_name}' (ID: {team_id}).")
-                await query.edit_message_caption(
-                    f"✅ Você está pronto para representar sua casa {team_name}! Junte amigos e boa aventura!",
-                    reply_markup=reply_markup
-                )
-            elif reg_response.status_code == 400 and "already exists" in reg_response.text:
-                logger.info(f"User {user.username} was already registered for a team.")
-                await query.edit_message_caption(
-                    f"Você já está em um time, mas aqui está o link para '{team_name}':",
-                    reply_markup=reply_markup
-                )
-            else:
-                await query.edit_message_caption(f"❌ Erro ao registrar no time: {reg_response.text}")
+        if reg_response.status_code == 201:
+            logger.info(f"User {user.username} registered for team '{team_name}' (ID: {team_id}).")
+            await query.edit_message_caption(
+                f"✅ Você está pronto para representar sua casa {team_name}! Junte amigos e boa aventura!",
+                reply_markup=reply_markup,
+            )
+        else:
+            await query.edit_message_caption(
+                f"Aqui está o link para '{team_name}':",
+                reply_markup=reply_markup,
+            )
 
     except httpx.RequestError as e:
-        logger.error(f"HTTP error while trying to register participant: {e}")
+        logger.error(f"HTTP error in join_team: {e}")
         await query.edit_message_caption("❌ Erro de comunicação com o servidor. Tente novamente mais tarde.")
     except Exception as e:
-        logger.error(f"An unexpected error occurred in join_team: {e}")
+        logger.error(f"Unexpected error in join_team: {e}")
         await query.edit_message_caption("❌ Um erro inesperado aconteceu.")
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("Ação Cancelada. Use /start para ver o menu principal.")
     return ConversationHandler.END
+
 
 @rate_limit_handler
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -151,119 +150,99 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "❗ Para salvar localização, envie a imagem como **Arquivo/Documento** (não como foto). "
         "Toque no clipe > Arquivo > selecione a imagem original. Depois reenvie aqui."
     )
-    return
+
 
 @rate_limit_handler
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handles document submissions (JPEG and HEIC images) from users within a group topic.
-    """
+    """Handles JPEG/HEIC document submissions from users within a group topic."""
     message = update.message
     user = update.effective_user
+    http: httpx.AsyncClient = context.bot_data['http']
 
     if not message.is_topic_message or not message.message_thread_id:
         return
 
     document = message.document
     if document.mime_type not in ['image/jpeg', 'image/heic']:
-        await message.reply_text("Please send JPEG images as files.")
+        await message.reply_text("Por favor, envie imagens JPEG ou HEIC.")
         return
 
-    doc_file = await context.bot.get_file(document.file_id)
-    participant_id = str(user.id)
-
     try:
+        doc_file = await context.bot.get_file(document.file_id)
         doc_bytes = await doc_file.download_as_bytearray()
 
-        files = {'photo': (document.file_name, bytes(doc_bytes))}
-        data = {
-            'participant_id': participant_id,
-            'thread_id': message.message_thread_id
-        }
-
-        async with httpx.AsyncClient() as client:
-            response = await client.post(f"{BACKEND_URL}/submissions/", files=files, data=data)
+        response = await http.post(
+            "/submissions/",
+            files={'photo': (document.file_name, bytes(doc_bytes))},
+            data={'participant_id': str(user.id), 'thread_id': message.message_thread_id},
+        )
 
         if response.status_code == 201:
-            logger.info(f"User {user.username} submitted an image in topic {message.message_thread_id}.")
+            logger.info(f"User {user.username} submitted image in topic {message.message_thread_id}.")
             await message.reply_text("✅ Imagem submetida com sucesso! Aguarde uns segundinhos até a imagem ser processada.")
         elif response.status_code == 403:
-            logger.warning(f"User {user.username} tried to submit to a wrong team in topic {message.message_thread_id}.")
+            logger.warning(f"User {user.username} submitted to wrong team in topic {message.message_thread_id}.")
             await message.reply_text("❌ Ô zé, vc tá mandando a foto pra casa errada.")
         elif response.status_code == 404:
             if "Participant" in response.text:
                 await message.reply_text("❌ Vc parece não tá registrado ainda. Manda mensagem pro nosso mano @DataDaColeta_Bot pra se registrar.")
-            else: # Team not found for the thread
+            else:
                 await message.reply_text("❌ Esse canal não é pra mandar fotos 😭😭😭😭😭.")
         else:
+            logger.error(f"Unexpected backend response {response.status_code}: {response.text}")
             await message.reply_text(f"❌ Deu um erro aí. Perdoar 🙏🙏. Erro: {response.text}")
 
     except Exception as e:
-        logger.error(f"Error handling document submission for user {user.id} in topic {message.message_thread_id}: {e}")
+        logger.error(f"Error handling document for user {user.id} in topic {message.message_thread_id}: {e}", exc_info=True)
         await message.reply_text("❌ Algum trem quebrou aqui :( Tenta de novo mais tarde, pufavo.")
 
+
 async def remove_points(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Removes points from a team's score."""
+    """Removes points from the team associated with the current topic (admin only)."""
     user = update.effective_user
-    chat = update.effective_chat
     message = update.message
+    http: httpx.AsyncClient = context.bot_data['http']
 
     if not message.is_topic_message or not message.message_thread_id:
         return
 
     try:
-        chat_admins = await context.bot.get_chat_administrators(chat.id)
-        admin_ids = {admin.user.id for admin in chat_admins}
-
+        admin_ids = await _get_admin_ids(context.bot, update.effective_chat.id)
         if user.id not in admin_ids:
-            await update.message.reply_text("❌ Seu safadinho. Apenas administradores podem remover pontos 😤😤")
+            await message.reply_text("❌ Seu safadinho. Apenas administradores podem remover pontos 😤😤")
             return
 
         if not context.args:
-            await update.message.reply_text("Esqueceu, zé? Precisa botar a quantidade de pontos depois do comando Ex: /remove_points 20")
+            await message.reply_text("Esqueceu, zé? Precisa botar a quantidade de pontos depois do comando. Ex: /remove_points 20")
             return
 
         points_to_remove = int(context.args[0])
-        thread_id = message.message_thread_id
 
-        async with httpx.AsyncClient() as client:
-            try:
-                # First, get the team_id from the thread_id
-                get_team_response = await client.get(f"{BACKEND_URL}/teams/by_thread/{thread_id}")
-                
-                if get_team_response.status_code != 200:
-                    await update.message.reply_text(f"❌ Erro ao encontrar o time para este chat: {get_team_response.text}")
-                    return
+        get_team_response = await http.get(f"/teams/by_thread/{message.message_thread_id}")
+        if get_team_response.status_code != 200:
+            await message.reply_text(f"❌ Erro ao encontrar o time para este chat: {get_team_response.text}")
+            return
 
-                team_id = get_team_response.json()["id"]
+        team_id = get_team_response.json()["id"]
+        remove_response = await http.patch(f"/teams/{team_id}/score", json={"points": points_to_remove})
 
-                # Now, remove the points from the team
-                remove_score_response = await client.patch(
-                    f"{BACKEND_URL}/teams/{team_id}/score",
-                    json={"points": points_to_remove}
-                )
-
-                if remove_score_response.status_code == 200:
-                    await update.message.reply_text(f"✅ {points_to_remove} pontos foram removidos do time.")
-                else:
-                    await update.message.reply_text(f"❌ Erro ao remover os pontos: {remove_score_response.text}")
-            
-            except httpx.RequestError as e:
-                await update.message.reply_text(f"❌ Erro de comunicação com o servidor: {e}")
-                logger.error(f"Failed to remove points due to communication error: {e}")
+        if remove_response.status_code == 200:
+            await message.reply_text(f"✅ {points_to_remove} pontos foram removidos do time.")
+        else:
+            await message.reply_text(f"❌ Erro ao remover os pontos: {remove_response.text}")
 
     except (IndexError, ValueError):
-        await update.message.reply_text("Comando inválido. Use /remove_points <pontos>.")
+        await message.reply_text("Comando inválido. Use /remove_points <pontos>.")
+    except httpx.RequestError as e:
+        logger.error(f"HTTP error in remove_points: {e}")
+        await message.reply_text(f"❌ Erro de comunicação com o servidor: {e}")
     except Exception as e:
-        await update.message.reply_text(f"❌ Um erro inesperado aconteceu: {e}")
-        logger.error(f"Failed to remove points: {e}")
-
+        logger.error(f"Unexpected error in remove_points: {e}")
+        await message.reply_text(f"❌ Um erro inesperado aconteceu: {e}")
 
 
 async def export_data_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Asks the user for the export format.
-    """
+    """Asks admin for the export format."""
     user = update.effective_user
     chat = update.effective_chat
 
@@ -272,9 +251,7 @@ async def export_data_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     try:
-        chat_admins = await context.bot.get_chat_administrators(chat.id)
-        admin_ids = {admin.user.id for admin in chat_admins}
-
+        admin_ids = await _get_admin_ids(context.bot, chat.id)
         if user.id not in admin_ids:
             await update.message.reply_text("❌ Apenas administradores podem exportar os dados.")
             return
@@ -283,210 +260,247 @@ async def export_data_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             [InlineKeyboardButton("CSV", callback_data="export_csv")],
             [InlineKeyboardButton("JSON", callback_data="export_json")],
         ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text("Selecione o formato para exportar os dados:", reply_markup=reply_markup)
+        await update.message.reply_text("Selecione o formato:", reply_markup=InlineKeyboardMarkup(keyboard))
 
     except Exception as e:
+        logger.error(f"Error in export_data_command: {e}")
         await update.message.reply_text(f"❌ Um erro inesperado aconteceu: {e}")
-        logger.error(f"Failed to ask for export format: {e}")
 
 
 async def export_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Fetches the data from the backend and sends the file to the user.
-    """
+    """Fetches the export from the backend and sends it to the user."""
     query = update.callback_query
     await query.answer()
+    http: httpx.AsyncClient = context.bot_data['http']
 
-    format = query.data.split("_")[-1]
-
+    fmt = query.data.split("_")[-1]
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(f"{BACKEND_URL}/export/{format}")
-
-            if response.status_code == 200:
-                if format == "csv":
-                    file_content = response.content
-                    await context.bot.send_document(
-                        chat_id=query.message.chat_id,
-                        document=file_content,
-                        filename="submissions.csv"
-                    )
-                elif format == "json":
-                    file_content = response.content
-                    await context.bot.send_document(
-                        chat_id=query.message.chat_id,
-                        document=file_content,
-                        filename="submissions.json"
-                    )
-            else:
-                await query.edit_message_text(f"❌ Erro ao exportar os dados: {response.text}")
-
+        response = await http.get(f"/export/{fmt}")
+        if response.status_code == 200:
+            await context.bot.send_document(
+                chat_id=query.message.chat_id,
+                document=response.content,
+                filename=f"submissions.{fmt}",
+            )
+        else:
+            await query.edit_message_text(f"❌ Erro ao exportar os dados: {response.text}")
     except Exception as e:
+        logger.error(f"Error in export_data: {e}")
         await query.edit_message_text(f"❌ Um erro inesperado aconteceu: {e}")
-        logger.error(f"Failed to export data: {e}")
 
 
 async def create_event_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Creates a new event in the backend.
-    This command can only be used by administrators in the group chat.
-    """
+    """Creates a new event (admin only, supergroup)."""
     user = update.effective_user
     chat = update.effective_chat
+    http: httpx.AsyncClient = context.bot_data['http']
 
-    # Check if the command is used in a supergroup
     if chat.type != 'supergroup':
         await update.message.reply_text("Este comando só pode ser usado em um chat de grupo.")
         return
 
     try:
-        # Get chat administrators
-        chat_admins = await context.bot.get_chat_administrators(chat.id)
-        admin_ids = {admin.user.id for admin in chat_admins}
-
-        # Check if the user is an administrator
+        admin_ids = await _get_admin_ids(context.bot, chat.id)
         if user.id not in admin_ids:
             await update.message.reply_text("❌ Apenas administradores podem criar novos eventos.")
             return
 
-        async with httpx.AsyncClient() as client:
-            # The date is sent in ISO 8601 format
-            event_data = {"date": datetime.datetime.utcnow().isoformat()}
-            response = await client.post(f"{BACKEND_URL}/events/", json=event_data)
-
-            if response.status_code == 201:
-                event_id = response.json()["id"]
-                event_date = response.json()["date"]
-                await update.message.reply_text(f"✅ Novo evento criado com sucesso! ID: {event_id}, Data: {event_date}")
-                logger.info(f"New event created with ID {event_id} by admin {user.username}")
-            else:
-                await update.message.reply_text(f"❌ Erro ao criar o evento: {response.text}")
-                logger.error(f"Failed to create event. Backend response: {response.text}")
+        response = await http.post("/events/", json={"date": datetime.datetime.utcnow().isoformat()})
+        if response.status_code == 201:
+            event = response.json()
+            await update.message.reply_text(f"✅ Novo evento criado! ID: {event['id']}, Data: {event['date']}")
+            logger.info(f"Event {event['id']} created by admin {user.username}.")
+        else:
+            await update.message.reply_text(f"❌ Erro ao criar o evento: {response.text}")
 
     except httpx.RequestError as e:
-        logger.error(f"HTTP error while creating event: {e}")
+        logger.error(f"HTTP error in create_event_command: {e}")
         await update.message.reply_text("❌ Erro de comunicação com o servidor. Tente novamente mais tarde.")
     except Exception as e:
+        logger.error(f"Unexpected error in create_event_command: {e}")
         await update.message.reply_text(f"❌ Um erro inesperado aconteceu: {e}")
-        logger.error(f"Failed to create event: {e}")
+
+
+# --- RankingManager ---
+
+LEGACY_THREAD_ID_FILE = "src/bot/ranking_thread_id.txt"
 
 
 class RankingManager:
-    def __init__(self, application):
+    def __init__(self, application: Application, http: httpx.AsyncClient):
         self.application = application
-        self.ranking_thread_id = None
-        self.last_ranking_message_id = None
-        self.last_ranking_text = None
-        self.thread_id_file = "src/bot/ranking_thread_id.txt"
+        self.http = http
+        self.ranking_thread_id: int | None = None
+        self.event_id: int | None = None
+        self.last_ranking_message_id: int | None = None
+        self.last_ranking_text: str | None = None
 
     async def setup(self):
-        self.load_ranking_thread_id()
-        if not self.ranking_thread_id:
-            await self.create_ranking_topic()
+        await self._load_thread_id()
 
         if self.ranking_thread_id:
-            self.application.add_handler(MessageHandler(
-                filters.ChatType.SUPERGROUP,
-                self.delete_user_message
-            ))
+            # Verify the stored topic still exists in Telegram before trusting it
+            if not await self._topic_exists(self.ranking_thread_id):
+                logger.warning(
+                    f"Stored ranking thread_id {self.ranking_thread_id} no longer exists in Telegram. "
+                    "Creating a new Ranking topic."
+                )
+                self.ranking_thread_id = None
+
+        if not self.ranking_thread_id:
+            await self._create_ranking_topic()
+
+        if self.ranking_thread_id:
+            self.application.add_handler(
+                MessageHandler(filters.ChatType.SUPERGROUP, self._delete_non_admin_message)
+            )
             scheduler = AsyncIOScheduler()
             scheduler.add_job(self.show_ranking, 'interval', minutes=1)
             scheduler.start()
 
-    def load_ranking_thread_id(self):
+    async def _topic_exists(self, thread_id: int) -> bool:
+        """
+        Verify a forum topic is still accessible by sending and immediately deleting
+        a probe message. Returns False if the topic was deleted or is inaccessible.
+        """
         try:
-            with open(self.thread_id_file, "r") as f:
-                self.ranking_thread_id = int(f.read().strip())
-                logger.info(f"Loaded 'Ranking' topic thread_id {self.ranking_thread_id} from file.")
+            msg = await self.application.bot.send_message(
+                chat_id=CHAT_ID,
+                message_thread_id=thread_id,
+                text=".",
+            )
+            await msg.delete()
+            return True
+        except Exception as e:
+            logger.warning(f"Topic {thread_id} probe failed: {e}")
+            return False
+
+    async def _load_thread_id(self):
+        """Load ranking_thread_id: try DB first, then legacy file as fallback."""
+        await self._load_from_db()
+        if self.ranking_thread_id:
+            return
+
+        # Fallback: legacy flat file from before DB persistence was added
+        try:
+            with open(LEGACY_THREAD_ID_FILE, "r") as f:
+                thread_id = int(f.read().strip())
+            self.ranking_thread_id = thread_id
+            logger.info(
+                f"Loaded ranking thread_id {thread_id} from legacy file. "
+                "Saving to DB so this file won't be needed again."
+            )
+            await self._save_to_db()
         except (FileNotFoundError, ValueError):
-            logger.info(f"'{self.thread_id_file}' not found or invalid. A new topic will be created.")
-            self.ranking_thread_id = None
+            logger.info("No ranking thread_id found in DB or legacy file. Will create a new topic.")
 
-    def save_ranking_thread_id(self):
-        with open(self.thread_id_file, "w") as f:
-            f.write(str(self.ranking_thread_id))
-        logger.info(f"Saved 'Ranking' topic thread_id {self.ranking_thread_id} to file.")
+    async def _load_from_db(self):
+        """Load ranking_thread_id from the latest event in the backend."""
+        try:
+            response = await self.http.get("/events/")
+            if response.status_code == 200 and response.json():
+                event = response.json()[0]
+                self.event_id = event["id"]
+                self.ranking_thread_id = event.get("ranking_thread_id")
+                if self.ranking_thread_id:
+                    logger.info(f"Loaded ranking thread_id {self.ranking_thread_id} from DB (event {self.event_id}).")
+                else:
+                    logger.info(f"No ranking thread_id in DB for event {self.event_id}.")
+        except Exception as e:
+            logger.error(f"Failed to load ranking thread_id from DB: {e}")
 
-    async def create_ranking_topic(self):
+    async def _save_to_db(self):
+        """Persist ranking_thread_id to the event record in the backend."""
+        if not self.event_id:
+            logger.error("Cannot save ranking thread_id: no event_id available.")
+            return
+        try:
+            response = await self.http.patch(
+                f"/events/{self.event_id}/ranking_thread",
+                json={"ranking_thread_id": self.ranking_thread_id},
+            )
+            if response.status_code == 200:
+                logger.info(f"Saved ranking thread_id {self.ranking_thread_id} to DB.")
+            else:
+                logger.error(f"Failed to save ranking thread_id: {response.text}")
+        except Exception as e:
+            logger.error(f"Error saving ranking thread_id to DB: {e}")
+
+    async def _create_ranking_topic(self):
         try:
             new_topic = await self.application.bot.create_forum_topic(chat_id=CHAT_ID, name="Ranking")
             self.ranking_thread_id = new_topic.message_thread_id
-            self.save_ranking_thread_id()
-            logger.info(f"Created 'Ranking' topic with thread_id {self.ranking_thread_id}")
+            await self._save_to_db()
+            logger.info(f"Created 'Ranking' topic with thread_id {self.ranking_thread_id}.")
         except Exception as e:
             if "topic with the same name already exists" in str(e):
-                logger.warning("'Ranking' topic already exists, but I could not get its thread_id. "
-                               f"Please find the thread_id of the 'Ranking' topic and save it to the '{self.thread_id_file}' file. "
-                               "The bot will not post rankings until this is done.")
+                logger.warning(
+                    "A 'Ranking' topic already exists but its thread_id is not in the DB. "
+                    "Find the thread_id and call PATCH /events/{id}/ranking_thread manually, "
+                    "then restart the bot."
+                )
             else:
                 logger.error(f"Failed to create 'Ranking' topic: {e}")
 
-    async def delete_user_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if update.message.message_thread_id == self.ranking_thread_id:
-            # Check if the user is an admin
-            chat_admins = await self.application.bot.get_chat_administrators(CHAT_ID)
-            admin_ids = {admin.user.id for admin in chat_admins}
-            if update.message.from_user.id not in admin_ids:
-                await update.message.delete()
+    async def _delete_non_admin_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if update.message.message_thread_id != self.ranking_thread_id:
+            return
+        admin_ids = await _get_admin_ids(self.application.bot, CHAT_ID)
+        if update.message.from_user.id not in admin_ids:
+            await update.message.delete()
 
     async def show_ranking(self):
         if not self.ranking_thread_id:
-            logger.warning("Ranking thread_id not available. Skipping ranking update.")
+            logger.warning("Ranking thread_id not set. Skipping ranking update.")
             return
-
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(f"{BACKEND_URL}/ranking/")
+            response = await self.http.get("/ranking/")
+            if response.status_code != 200:
+                logger.error(f"Failed to fetch ranking: {response.text}")
+                return
 
-                if response.status_code == 200:
-                    teams = response.json()
-                    if not teams:
-                        ranking_message = "Ainda não há pontuação no ranking."
-                    else:
-                        ranking_message = "🏆 **Ranking da Competição** 🏆\n\n"
-                        for i, team in enumerate(teams):
-                            ranking_message += f"{i+1}º - {team['name']}: {team['score']} pontos\n"
+            teams = response.json()
+            if not teams:
+                ranking_message = "Ainda não há pontuação no ranking."
+            else:
+                ranking_message = "🏆 **Ranking da Competição** 🏆\n\n"
+                for i, team in enumerate(teams):
+                    ranking_message += f"{i+1}º - {team['name']}: {team['score']} pontos\n"
 
-                    if self.last_ranking_text == ranking_message:
-                        return
+            if ranking_message == self.last_ranking_text:
+                return
 
-                    if self.last_ranking_message_id:
-                        await self.application.bot.edit_message_text(
-                            chat_id=CHAT_ID,
-                            message_id=self.last_ranking_message_id,
-                            text=ranking_message,
-                            parse_mode="Markdown"
-                        )
-                    else:
-                        message = await self.application.bot.send_message(
-                            chat_id=CHAT_ID,
-                            message_thread_id=self.ranking_thread_id,
-                            text=ranking_message,
-                            parse_mode="Markdown"
-                        )
-                        self.last_ranking_message_id = message.message_id
-                    self.last_ranking_text = ranking_message
-                else:
-                    logger.error(f"Failed to fetch ranking. Backend response: {response.text}")
+            if self.last_ranking_message_id:
+                await self.application.bot.edit_message_text(
+                    chat_id=CHAT_ID,
+                    message_id=self.last_ranking_message_id,
+                    text=ranking_message,
+                    parse_mode="Markdown",
+                )
+            else:
+                message = await self.application.bot.send_message(
+                    chat_id=CHAT_ID,
+                    message_thread_id=self.ranking_thread_id,
+                    text=ranking_message,
+                    parse_mode="Markdown",
+                )
+                self.last_ranking_message_id = message.message_id
+
+            self.last_ranking_text = ranking_message
 
         except httpx.RequestError as e:
-            logger.error(f"HTTP error while fetching ranking: {e}")
+            logger.error(f"HTTP error fetching ranking: {e}")
         except Exception as e:
-            logger.error(f"Failed to show ranking: {e}")
+            logger.error(f"Unexpected error in show_ranking: {e}")
+
+
+# --- Create topic conversation ---
 
 async def create_topic_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """
-    Starts the conversation to create a new topic.
-    This command can only be used in a private chat with the bot.
-    """
+    """Starts the create-team conversation (admin only, private chat)."""
     user = update.effective_user
     try:
-        # Get chat administrators of the supergroup
-        chat_admins = await context.bot.get_chat_administrators(CHAT_ID)
-        admin_ids = {admin.user.id for admin in chat_admins}
-
-        # Check if the user is an administrator
+        admin_ids = await _get_admin_ids(context.bot, CHAT_ID)
         if user.id not in admin_ids:
             await update.message.reply_text("❌ Apenas administradores podem criar novos times.")
             return ConversationHandler.END
@@ -495,146 +509,153 @@ async def create_topic_command(update: Update, context: ContextTypes.DEFAULT_TYP
         return ASK_TOPIC_NAME
 
     except Exception as e:
+        logger.error(f"Error in create_topic_command: {e}")
         await update.message.reply_text(f"❌ Um erro inesperado aconteceu: {e}")
-        logger.error(f"Failed to start create topic conversation: {e}")
         return ConversationHandler.END
 
+
 async def create_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """
-    Creates a new team in the backend, a new topic in Telegram,
-    and registers the creator as the first participant.
-    """
+    """Creates a team in the DB, a Telegram topic, and links them atomically."""
     topic_name = update.message.text
     user = update.effective_user
-    
+    http: httpx.AsyncClient = context.bot_data['http']
+
     try:
         # Step 1: Get the latest event
-        async with httpx.AsyncClient() as client:
-            events_response = await client.get(f"{BACKEND_URL}/events/")
-            if events_response.status_code != 200 or not events_response.json():
-                await update.message.reply_text("❌ Não há eventos ativos para criar times. Peça para um admin criar um novo evento.")
-                return ConversationHandler.END
+        events_response = await http.get("/events/")
+        if events_response.status_code != 200 or not events_response.json():
+            await update.message.reply_text("❌ Não há eventos ativos. Peça para um admin criar um novo evento.")
+            return ConversationHandler.END
 
-            latest_event_id = events_response.json()[0]["id"]
+        latest_event_id = events_response.json()[0]["id"]
 
-            # Step 2: Create the team in the backend
-            team_data = {"name": topic_name, "event_id": latest_event_id}
-            response = await client.post(f"{BACKEND_URL}/teams/", json=team_data)
+        # Step 2: Create the team in the backend
+        team_response = await http.post("/teams/", json={"name": topic_name, "event_id": latest_event_id})
+        if team_response.status_code == 400 and "already exists" in team_response.text:
+            await update.message.reply_text(f"❌ O time '{topic_name}' já existe. Por favor, escolha outro nome.")
+            return ConversationHandler.END
+        if team_response.status_code != 201:
+            await update.message.reply_text(f"❌ Erro ao criar o time no servidor: {team_response.text}")
+            return ConversationHandler.END
 
-            if response.status_code == 201:
-                team_id = response.json()["id"]
-                logger.info(f"Team '{topic_name}' created in backend with ID {team_id}.")
+        team_id = team_response.json()["id"]
+        logger.info(f"Team '{topic_name}' created in backend with ID {team_id}.")
 
-                # Step 3: Register the creator as a participant
-                participant_data = {
-                    "id": str(user.id),
-                    "name": user.full_name,
-                    "team_id": team_id
-                }
-                part_response = await client.post(f"{BACKEND_URL}/participants/", json=participant_data)
-                if part_response.status_code != 201:
-                    logger.error(f"Failed to register participant {user.username} for new team '{topic_name}'. Backend response: {part_response.text}")
+        # Step 3: Register the creator as a participant
+        part_response = await http.post("/participants/", json={
+            "id": str(user.id),
+            "name": user.full_name,
+            "team_id": team_id,
+        })
+        if part_response.status_code != 201:
+            logger.error(f"Failed to register participant {user.username} for team '{topic_name}': {part_response.text}")
 
-            elif response.status_code == 400 and "already exists" in response.text:
-                await update.message.reply_text(f"❌ O time '{topic_name}' já existe. Por favor, escolha outro nome.")
-                return ConversationHandler.END
-            else:
-                await update.message.reply_text(f"❌ Erro ao criar o time no servidor: {response.text}")
-                return ConversationHandler.END
-
-        # Step 4: Create the topic in Telegram
+        # Step 4: Create the Telegram topic
         new_topic = await context.bot.create_forum_topic(chat_id=CHAT_ID, name=topic_name)
         thread_id = new_topic.message_thread_id
 
-        # Step 5: Update the team in the backend with the thread_id
-        async with httpx.AsyncClient() as client:
-            update_data = {"thread_id": str(thread_id)}
-            update_response = await client.patch(f"{BACKEND_URL}/teams/{team_id}", json=update_data)
-            if update_response.status_code != 200:
-                logger.error(f"Failed to update team {team_id} with thread_id {thread_id}. Backend response: {update_response.text}")
+        # Step 5: Link the team to the Telegram topic
+        link_response = await http.patch(f"/teams/{team_id}", json={"thread_id": thread_id})
+        if link_response.status_code != 200:
+            # Partial failure: topic was created but not linked — try to roll back the topic
+            logger.error(f"Failed to link team {team_id} to thread {thread_id}: {link_response.text}")
+            try:
+                await context.bot.delete_forum_topic(chat_id=CHAT_ID, message_thread_id=thread_id)
+                await update.message.reply_text(
+                    f"❌ Erro ao associar o grupo ao servidor. A operação foi revertida. Tente novamente."
+                )
+            except Exception as cleanup_err:
+                logger.error(f"Failed to delete orphaned topic {thread_id}: {cleanup_err}")
+                await update.message.reply_text(
+                    f"❌ Erro crítico: o tópico Telegram '{topic_name}' foi criado (thread_id={thread_id}) "
+                    f"mas não foi salvo no banco. Anote esse ID e contate um admin para corrigir manualmente."
+                )
+            return ConversationHandler.END
 
-        welcome_message_text = (
-            f'👋 **Seja bem-vindo ao grupo "{topic_name}"!**\n\n'
-            f"O grupo foi criado e você foi registrado como o primeiro participante, {user.mention_markdown()}."
-        )
+        # Step 6: Send welcome message to the new topic
         await context.bot.send_message(
             chat_id=CHAT_ID,
             message_thread_id=thread_id,
-            text=welcome_message_text,
-            parse_mode="Markdown"
+            text=(
+                f'👋 **Seja bem-vindo ao grupo "{topic_name}"!**\n\n'
+                f"O grupo foi criado e você foi registrado como o primeiro participante, {user.mention_markdown()}."
+            ),
+            parse_mode="Markdown",
         )
 
-        # Step 6: Send confirmation to the user
+        # Step 7: Confirm to the admin
         link_chat_id = str(CHAT_ID).replace("-100", "")
         topic_link = f"https://t.me/c/{link_chat_id}/{thread_id}"
-        
-        keyboard = [[InlineKeyboardButton("➡️ Ir para o grupo!", url=topic_link)]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
         await update.message.reply_text(
-            f"✅ Maravilha! O grupo \"{topic_name}\" foi criado e você foi registrado nele.", reply_markup=reply_markup
+            f"✅ Maravilha! O grupo \"{topic_name}\" foi criado e você foi registrado nele.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Ir para o grupo!", url=topic_link)]]),
         )
-        logger.info(f"User {user.username} created topic '{topic_name}' and was registered in chat {CHAT_ID}")
+        logger.info(f"User {user.username} created topic '{topic_name}' (thread_id={thread_id}).")
 
     except httpx.RequestError as e:
-        logger.error(f"HTTP error while creating topic/participant: {e}")
+        logger.error(f"HTTP error in create_topic: {e}")
         await update.message.reply_text("❌ Erro de comunicação com o servidor. Tente novamente mais tarde.")
     except Exception as e:
+        logger.error(f"Unexpected error in create_topic: {e}", exc_info=True)
         await update.message.reply_text(f"❌ Um erro inesperado aconteceu: {e}")
-        logger.error(f"Failed to create topic and register participant in chat {CHAT_ID}: {e}")
-        
+
     return ConversationHandler.END
 
+
+# --- Application lifecycle ---
+
+async def _post_init(application: Application) -> None:
+    """Set up shared HTTP client and ranking manager before polling starts."""
+    http = httpx.AsyncClient(base_url=BACKEND_URL, timeout=30.0)
+    application.bot_data['http'] = http
+
+    ranking_manager = RankingManager(application, http)
+    application.bot_data['ranking_manager'] = ranking_manager
+    await ranking_manager.setup()
+
+
+async def _post_shutdown(application: Application) -> None:
+    """Clean up shared resources on shutdown."""
+    http: httpx.AsyncClient = application.bot_data.get('http')
+    if http:
+        await http.aclose()
+
+
 def main() -> None:
-    """Starts the bot and sets up handlers."""
     if not TELEGRAM_TOKEN or CHAT_ID == 0:
         logger.error("TELEGRAM_TOKEN or CHAT_ID not set correctly in .env")
         return
 
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    application = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .post_init(_post_init)
+        .post_shutdown(_post_shutdown)
+        .build()
+    )
 
-    # --- Filters ---
     private_filter = filters.ChatType.PRIVATE
     group_topic_filter = filters.ChatType.SUPERGROUP & filters.IS_TOPIC_MESSAGE
 
     application.add_handler(CommandHandler("start", start, filters=private_filter))
     application.add_handler(CallbackQueryHandler(start, pattern="^main_menu$"))
-    
-    # New handler for the registration-based join flow
     application.add_handler(CallbackQueryHandler(join_team, pattern=r"^join_team_"))
-
-    # Group handler for photo submissions in topics
     application.add_handler(MessageHandler(filters.PHOTO & group_topic_filter, handle_photo))
     application.add_handler(MessageHandler(filters.Document.IMAGE & group_topic_filter, handle_document))
-
-    # Command to create a new event
     application.add_handler(CommandHandler("create_event", create_event_command, filters=filters.ChatType.SUPERGROUP))
-
-    # Command to remove points from a team
     application.add_handler(CommandHandler("remove_points", remove_points, filters=filters.ChatType.SUPERGROUP))
-
-    # Command to export data
     application.add_handler(CommandHandler("export", export_data_command, filters=filters.ChatType.SUPERGROUP))
     application.add_handler(CallbackQueryHandler(export_data, pattern="^export_csv$"))
     application.add_handler(CallbackQueryHandler(export_data, pattern="^export_json$"))
-
-    # Conversation handler for creating a new topic
-    conv_handler = ConversationHandler(
+    application.add_handler(ConversationHandler(
         entry_points=[CommandHandler('create_topic', create_topic_command, filters=private_filter)],
-        states={
-            ASK_TOPIC_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_topic)],
-        },
+        states={ASK_TOPIC_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_topic)]},
         fallbacks=[CommandHandler('cancel', cancel)],
-    )
-    application.add_handler(conv_handler)
-
-    # --- Start background tasks ---
-    ranking_manager = RankingManager(application)
-    loop = asyncio.get_event_loop()
-    loop.create_task(ranking_manager.setup())
+    ))
 
     logger.info("Bot is starting...")
     application.run_polling()
+
 
 if __name__ == "__main__":
     main()
